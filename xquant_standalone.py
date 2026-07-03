@@ -6,7 +6,16 @@
 Deps (лёгкие, без torch): numpy, gguf, safetensors(header-only). → exe ~150МБ.
 Запуск:  xquant_standalone.py <model.safetensors> [Q4_0|Q3_K|Q2_K]
 """
-import os, sys, json, struct, numpy as np
+import os, sys, json, struct, time, numpy as np
+
+def _fmt_dur(sec):
+    """Секунды → человекочитаемо: '45.3с' / '2м 05с' / '1ч 03м'."""
+    sec = max(0.0, float(sec))
+    if sec < 60:   return f"{sec:.1f}с"
+    m, s = divmod(int(sec), 60)
+    if m < 60:     return f"{m}м {s:02d}с"
+    h, m = divmod(m, 60)
+    return f"{h}ч {m:02d}м"
 try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 except Exception: pass
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -278,6 +287,7 @@ def _out_path(src, qn):
 
 def compress_file(src, qn, log=print):
     """Сжать модель src в битность qn. log(msg) — колбэк прогресса. Возвращает dst."""
+    t0 = time.time()
     keys = [k for k,_,_,_ in _iter_hdr(src)]
     pfx = strip_prefix(keys)
     arch = detect_arch([k[len(pfx):] if pfx else k for k in keys])
@@ -302,7 +312,7 @@ def compress_file(src, qn, log=print):
     dst = _out_path(src, qn)
     log(f"пишу GGUF ({len(out)} тензоров)...")
     xgguf.write_gguf(dst, arch, out)
-    log(f"ГОТОВО: {os.path.basename(dst)}  {os.path.getsize(src)/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ")
+    log(f"ГОТОВО: {os.path.basename(dst)}  {os.path.getsize(src)/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  за {_fmt_dur(time.time()-t0)}")
     return dst
 
 def llm_critical(name):
@@ -314,6 +324,7 @@ def llm_critical(name):
 def requantize_gguf(src, qn, log=print):
     """LLM-сжатие: реквантизация существующего GGUF (F16/BF16/Q8 → Q4/Q3/Q2...).
     Метадата+токенайзер копируются сырыми байтами (llama.cpp/LM Studio читают)."""
+    t0 = time.time()
     f, ver, raw_meta, n_kv, tinfos, data_start, align = xgguf.read_gguf(src)
     fsize = os.path.getsize(src)
     offs = [t[3] for t in tinfos]
@@ -361,7 +372,7 @@ def requantize_gguf(src, qn, log=print):
         raw_meta = xgguf.patch_kv_u32(raw_meta, "general.file_type", ft)
     log(f"пишу LLM GGUF ({len(out)} тензоров, метадата+токенайзер сохранены)...")
     xgguf.write_gguf_raw(dst, raw_meta, n_kv, out)
-    log(f"ГОТОВО: {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (реквант {nq}, как-есть {npass})")
+    log(f"ГОТОВО: {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (реквант {nq}, как-есть {npass})  за {_fmt_dur(time.time()-t0)}")
     return dst
 
 def process(src, qn, log=print):
