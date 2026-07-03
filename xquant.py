@@ -7,6 +7,28 @@
 Q4_0 блок = 32 веса: fp16 d + 16 байт (по 2 ниббла). Деквант: x = d*(q-8).
 """
 import numpy as np
+import re as _re
+
+# ═══════════ УНИВЕРСАЛЬНАЯ ЗАЩИТА КРИТИЧЕСКИХ СЛОЁВ (все дифы) ═══════════
+# Входные эмбеддинги, выходная проекция в VAE, нормы, модуляция — НЕ квантуем
+# ни в какой архитектуре, иначе рвётся связь с декодером = цветной шум.
+# Покрывает FLUX / SDXL / SD1.5 / SD3 / Qwen-Image / Wan / Hunyuan / LTXV / PixArt.
+_CRITICAL_RE = _re.compile(
+    r"norm|_mod\b|mod\.lin|scale_shift|"                         # нормы/модуляция (везде)
+    r"final_layer|proj_out|conv_out|\bhead\b|head\.|out_proj_out|"  # ВЫХОД в латент/VAE
+    r"conv_in|img_in|txt_in|x_embedder|context_embedder|"        # ВХОД латента/текста
+    r"patch_embed|pos_embed|pos_embedder|caption_projection|"    # патч/позиц/капшн эмбеды
+    r"time_embed|time_emb|t_embedder|timestep_embedder|"         # время
+    r"y_embedder|label_emb|vector_in|guidance_in|add_embed|"     # доп. кондишн
+    r"text_embed|txt_in|cap_embedder|context_refiner|"          # текст-эмбеды
+    r"time_text_embed|norm_out|proj\.in|final\.",               # qwen/misc вход-выход
+    _re.IGNORECASE,
+)
+
+def is_critical(key: str) -> bool:
+    """True = слой критический (вход/выход/эмбед/норма) → держать в bf16, НЕ квантовать."""
+    return bool(_CRITICAL_RE.search(key))
+
 
 # ─────────────────────── НАШ Q4_0 (GGML-совместимый) ───────────────────────
 QK4_0 = 32

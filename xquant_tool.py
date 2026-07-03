@@ -39,11 +39,9 @@ def handle(writer, sd, arch, QNAME):
         if od in (torch.float32,torch.bfloat16) or "float8" in str(od):
             if nd==1 or npm<=convert.QUANTIZATION_THRESHOLD or any(x in key for x in arch.keys_hiprec):
                 qt=gguf.GGMLQuantizationType.F32
-        # ЗАЩИТА критических слоёв (Gemma п.3): выход в VAE (final_layer), входы
-        # латента/текста (img_in/txt_in/*_in), нормы, модуляция → НЕ квантуем,
-        # иначе связь с VAE-декодером рвётся = цветной шум. Особенно на суб-2-бит.
-        import re as _re
-        _crit = bool(_re.search(r"final_layer|img_in|txt_in|_in\.|norm|_mod|mod\.lin", key))
+        # УНИВЕРСАЛЬНАЯ защита критических слоёв (все архитектуры): вход/выход/
+        # эмбеды/нормы → bf16. Иначе рвётся связь с VAE = цветной шум. См. xquant.is_critical.
+        _crit = xq.is_critical(key)
         # большие 2D → наш квант
         blkdiv = OUR.get(QNAME,(None,None,32))[2]
         if (not _crit) and nd==2 and npm>convert.QUANTIZATION_THRESHOLD and qt in (gguf.GGMLQuantizationType.BF16,gguf.GGMLQuantizationType.F16) and data.shape[1]%blkdiv==0:

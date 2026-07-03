@@ -24,11 +24,10 @@ f = safe_open(SRC, framework="pt")
 out = {}; qkeys = []; pads = {}; nq = 0
 for k in f.keys():
     W = f.get_tensor(k)
-    # ЗАЩИТА критических слоёв: final_layer (выход в VAE) + нормы + модуляция → bf16.
-    # Крушить выходную проекцию в 1.6-бит = разрыв связи с VAE = цветной шум.
+    # УНИВЕРСАЛЬНАЯ защита критических слоёв (все архитектуры) — xquant.is_critical.
     if (k.endswith(".weight") and W.dim()==2 and W.numel()>=4096
             and re.search(r"attn|mlp|linear|qkv|proj", k)
-            and not re.search(r"norm|mod\.lin|_mod|final_layer|img_in|txt_in|_in\.", k)):
+            and not xq.is_critical(k)):
         arr = W.float().numpy()
         q, scale, gpad = xq.our_quantize_ternary(arr, group=GROUP)   # −1/0/+1 + scale
         packed, ppad = xq.pack_tern5(q)                              # base-3 5/байт
