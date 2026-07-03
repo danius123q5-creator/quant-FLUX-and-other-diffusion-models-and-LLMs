@@ -61,3 +61,7 @@ Commercial closed-source use is not permitted.
 
 *(Optional `xquant_tool.py` variant reuses City96's ComfyUI-GGUF `convert.py`,
 Apache-2.0 — see `NOTICE`. The standalone engine above uses none of it.)*
+
+## Contacts
+For **commercial licensing** and custom integration inquiries, contact me on
+Telegram: **[@GarrysmodMapper](https://t.me/GarrysmodMapper)**.
