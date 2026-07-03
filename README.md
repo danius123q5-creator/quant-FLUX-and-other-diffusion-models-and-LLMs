@@ -32,7 +32,11 @@ connection is never broken (the classic sub-4-bit "colour noise").
 collapses without quantization-aware training.
 
 ## Usage
-Drag a `.safetensors` model onto `compress_Q2_K.bat` (or `Q3_K` / `Q4_0`), or:
+**Easiest — the standalone `XQuant.exe`** (20 MB, no Python needed, numpy bundled):
+drag a `.safetensors` model onto `XQuant.exe` → get `<model>-Q2_K.gguf` next to it.
+Or from a terminal: `XQuant.exe <model.safetensors> [Q4_0|Q3_K|Q2_K]`.
+
+With Python instead:
 ```
 python xquant_standalone.py <model.safetensors> [Q4_0|Q3_K|Q2_K]
 ```
