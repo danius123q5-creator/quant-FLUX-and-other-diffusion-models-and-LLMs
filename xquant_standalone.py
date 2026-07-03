@@ -14,9 +14,30 @@ import xquant as xq
 import xgguf                                   # НАШ GGUF-писатель (без чужой gguf-либы)
 
 QUANT_THRESHOLD = 1024
-OUR = {"Q4_0": (xq.our_quantize_q4_0, xgguf.T.Q4_0, 32),
+OUR = {"Q5_0": (xq.our_quantize_q5_0, xgguf.T.Q5_0, 32),
+       "Q4_0": (xq.our_quantize_q4_0, xgguf.T.Q4_0, 32),
        "Q3_K": (xq.our_quantize_q3k, xgguf.T.Q3_K, 256),
        "Q2_K": (xq.our_quantize_q2k, xgguf.T.Q2_K, 256)}
+
+def pick_quant_gui(default="Q2_K"):
+    """Окошко-дропдаун выбора битности (при drag-drop без 2-го аргумента)."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except Exception:
+        return default
+    root = tk.Tk(); root.title("XQuant — выбор битности"); root.geometry("340x150")
+    root.eval('tk::PlaceWindow . center')
+    tk.Label(root, text="Сжать модель в:", font=("Segoe UI", 11)).pack(pady=(16,4))
+    opts = ["5-bit (Q5_0)", "4-bit (Q4_0)", "3-bit (Q3_K)", "2-bit (Q2_K)"]
+    m = {"5-bit (Q5_0)":"Q5_0","4-bit (Q4_0)":"Q4_0","3-bit (Q3_K)":"Q3_K","2-bit (Q2_K)":"Q2_K"}
+    var = tk.StringVar(value="2-bit (Q2_K)")
+    ttk.Combobox(root, textvariable=var, values=opts, state="readonly", width=22).pack(pady=4)
+    res = {"q": None}
+    def go(): res["q"] = m[var.get()]; root.destroy()
+    tk.Button(root, text="Сжать", command=go, width=14, height=1).pack(pady=12)
+    root.mainloop()
+    return res["q"] or default
 
 # ── детект архитектуры по ключам (без torch; порт city96 keys_detect) ──
 ARCHES = [
@@ -88,8 +109,9 @@ def main():
     if len(sys.argv) < 2:
         print("USAGE: xquant_standalone <model.safetensors> [Q4_0|Q3_K|Q2_K]"); return
     src = sys.argv[1].strip('"')
-    qn = (sys.argv[2] if len(sys.argv) > 2 else "Q2_K").upper()
     if not os.path.isfile(src): print("NO FILE:", src); return
+    # 2-й аргумент = битность из консоли; иначе (drag-drop) — окошко-дропдаун
+    qn = sys.argv[2].upper() if len(sys.argv) > 2 else pick_quant_gui()
     keys = [k for k,_,_,_ in _iter_hdr(src)]
     pfx = strip_prefix(keys)
     arch = detect_arch([k[len(pfx):] if pfx else k for k in keys])

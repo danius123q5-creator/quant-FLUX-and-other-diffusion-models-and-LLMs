@@ -59,6 +59,30 @@ def our_quantize_q4_0(x: np.ndarray) -> np.ndarray:
     blocks = np.concatenate([d_bytes, qs], axis=1)            # [nb,18]
     return blocks.reshape(-1)
 
+QK5_0 = 32
+def our_quantize_q5_0(x: np.ndarray) -> np.ndarray:
+    """Наш энкодер Q5_0 (5-бит, GGML). Блок 22 байта/32: fp16 d + 4 qh + 16 qs.
+    Деквант: x = d*(q-16), q 5-бит (низ 4 в qs, 5-й бит в qh-маске)."""
+    x = np.ascontiguousarray(x, dtype=np.float32).reshape(-1)
+    assert x.size % QK5_0 == 0
+    g = x.reshape(-1, QK5_0)
+    idx = np.abs(g).argmax(axis=1)
+    vmax = g[np.arange(g.shape[0]), idx]
+    d = (vmax / -16.0).astype(np.float32)
+    d16 = d.astype(np.float16)
+    id_ = np.where(d != 0, 1.0/np.where(d==0,1,d), 0.0).astype(np.float32)  # ПОЛНЫЙ d (не fp16)
+    q = np.clip((g*id_[:, None] + 16.5).astype(np.int32), 0, 31).astype(np.uint32)
+    lo = q[:, 0:16]; hi = q[:, 16:32]
+    qs = ((lo & 0x0F) | ((hi & 0x0F) << 4)).astype(np.uint8)          # [nb,16]
+    qh = np.zeros(g.shape[0], np.uint32)
+    for j in range(16):
+        qh |= ((lo[:, j] >> 4) & 1) << j
+        qh |= ((hi[:, j] >> 4) & 1) << (j + 16)
+    d_bytes = d16.view(np.uint8).reshape(-1, 2)
+    qh_bytes = qh.view(np.uint8).reshape(-1, 4)                        # LE
+    blocks = np.concatenate([d_bytes, qh_bytes, qs], axis=1)          # [nb,22]
+    return blocks.reshape(-1)
+
 def our_dequantize_q4_0(blocks: np.ndarray, n: int) -> np.ndarray:
     """Обратно (для проверки/замера ошибки)."""
     b = blocks.reshape(-1, 18)
