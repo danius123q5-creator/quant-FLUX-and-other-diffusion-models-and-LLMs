@@ -149,11 +149,80 @@ class XQuantGGUFLoader:
         return (model,)
 
 
+# ═══════════ МУЗЫКАЛЬНЫЙ загрузчик (Stable Audio / ACE-Step) ═══════════
+# Отдельная нода под аудио-диффузию: ищет .gguf ещё и в checkpoints/audio-папках,
+# разжимает так же, и ПРОВЕРЯЕТ что ComfyUI распознал именно аудио-модель
+# (StableAudio*/ACEStep*) — иначе даёт понятную ошибку вместо тихой картиночной
+# модели. Ключи-детекторы ComfyUI: Stable Audio — transformer.rotary_pos_emb.inv_freq;
+# ACE-Step — genre_embedder.weight (шейпы тензоров читаются из state_dict, который
+# наш загрузчик восстанавливает целиком с верными формами).
+
+def _list_gguf_music():
+    names = []
+    for folder in ("diffusion_models", "unet", "checkpoints", "audio_checkpoints", "audio"):
+        try: names += folder_paths.get_filename_list(folder)
+        except Exception: pass
+    return sorted({n for n in names if n.endswith(".gguf")}) or ["(нет .gguf файлов)"]
+
+
+def _find_music_path(name):
+    for folder in ("diffusion_models", "unet", "checkpoints", "audio_checkpoints", "audio"):
+        try:
+            p = folder_paths.get_full_path(folder, name)
+            if p and os.path.isfile(p): return p
+        except Exception: pass
+    return None
+
+
+# как ComfyUI помечает аудио-модели (comfy/supported_models.py)
+_AUDIO_MODEL_HINTS = ("stableaudio", "ace_step", "acestep", "ace-step")
+
+
+class XQuantMusicLoader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"unet_name": (_list_gguf_music(),)}}
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load"
+    CATEGORY = "XQuant"
+    TITLE = "XQuant Music Loader (Stable Audio / ACE-Step, 2-8bit)"
+
+    def load(self, unet_name):
+        path = _find_music_path(unet_name)
+        if not path:
+            raise FileNotFoundError(f"XQuant: не найден {unet_name}")
+        print(f"[XQuant] разжимаю музыкальный GGUF {unet_name} ...")
+        sd = _dequant_gguf_file(path)
+        model = comfy.sd.load_diffusion_model_state_dict(sd)
+        if model is None:
+            raise RuntimeError(
+                "XQuant Music: ComfyUI не распознал арх из state_dict. Это должна быть "
+                "аудио-ДИФФУЗИЯ (Stable Audio / ACE-Step). GPT-класс (Bark/MusicGen) "
+                "не грузится через diffusion-машинерию — им нужен свой рантайм."
+            )
+        # мягкая проверка что модель именно аудио — иначе предупреждаем, но не рушим
+        try:
+            _mc = type(getattr(model, "model", model)).__name__.lower()
+            _cfg = str(getattr(getattr(model, "model", None), "model_config", "")).lower()
+            _is_audio = any(h in _mc or h in _cfg for h in _AUDIO_MODEL_HINTS)
+            if not _is_audio:
+                print("[XQuant Music] ВНИМАНИЕ: модель загрузилась, но не опознана как "
+                      "Stable Audio / ACE-Step — проверь, что это музыкальная диффузия.")
+            else:
+                print(f"[XQuant Music] опознана аудио-модель ({_mc})")
+        except Exception:
+            pass
+        print(f"[XQuant] музыкальная модель собрана из GGUF ({len(sd)} тензоров)")
+        return (model,)
+
+
 NODE_CLASS_MAPPINGS = {
     "XQuantTernaryLoader": XQuantTernaryLoader,
     "XQuantGGUFLoader": XQuantGGUFLoader,
+    "XQuantMusicLoader": XQuantMusicLoader,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "XQuantTernaryLoader": "XQuant Ternary Loader (1.6-bit)",
     "XQuantGGUFLoader": "XQuant GGUF Loader (2-8bit · image/video/audio)",
+    "XQuantMusicLoader": "XQuant Music Loader (Stable Audio / ACE-Step)",
 }

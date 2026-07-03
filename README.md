@@ -74,9 +74,17 @@ music models too. The catch is the **loader**, not the compression:
   `.gguf → .gguf` requant path shrinks it and it runs in its native llama.cpp /
   whisper.cpp runtime **today**.
 - An **audio-diffusion `.safetensors`** (Stable Audio, ACE-Step) → XQuant will
-  compress it (arch tag `unknown`), and `XQuant GGUF Loader` will load it **iff
-  ComfyUI recognizes that architecture** from the state-dict. If ComfyUI can run
-  the model natively, the compressed GGUF loads through the same node.
+  compress it (arch tag `unknown`), and the dedicated **`XQuant Music Loader`**
+  node loads it back. ComfyUI natively detects Stable Audio (by
+  `transformer.rotary_pos_emb.inv_freq`) and ACE-Step (by `genre_embedder.weight`)
+  from the reconstructed state-dict, so the compressed DiT loads through the same
+  diffusion machinery (KSampler → `VAEDecodeAudio`). Load the VAE/conditioner
+  separately, as usual. GPT-class music models (Bark, MusicGen) are **not**
+  diffusion — they need their own runtime and won't load through this node.
+
+Verified: compressing a real audio model (Bark) works end-to-end (1.8 → 0.3 GB,
+valid GGUF). The Music Loader path reuses the exact dequant+load mechanism proven
+on FLUX; test it against your own Stable Audio / ACE-Step checkpoint.
 
 ## License — AGPL-3.0
 Licensed under **GNU AGPL-3.0**. Anyone who uses, modifies, or serves this code
