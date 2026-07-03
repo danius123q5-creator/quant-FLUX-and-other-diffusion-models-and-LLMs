@@ -63,8 +63,41 @@ def run_gui(prefill=""):
     btn.pack(pady=(0,12))
 
     def worker(src, qn):
-        try: compress_file(src, qn, logline)
-        except Exception as e: logline(f"ОШИБКА: {e}")
+        # сжатие в ОТДЕЛЬНОМ процессе, прогресс через файл → GUI не фризит совсем
+        import subprocess, tempfile, time
+        pf = tempfile.NamedTemporaryFile(prefix="xquant_", suffix=".log", delete=False)
+        pf.close(); progfile = pf.name
+        open(progfile, "w").close()
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, src, qn, progfile]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__), src, qn, progfile]
+        flags = 0x08000000 if os.name == "nt" else 0              # CREATE_NO_WINDOW
+        try:
+            p = subprocess.Popen(cmd, creationflags=flags)
+            pos = 0
+            while True:
+                try:
+                    with open(progfile, "r", encoding="utf-8", errors="replace") as fp:
+                        fp.seek(pos); new = fp.read(); pos = fp.tell()
+                    for ln in new.splitlines():
+                        if ln.strip(): logline(ln)
+                except Exception: pass
+                if p.poll() is not None:
+                    # дочитать хвост
+                    try:
+                        with open(progfile, "r", encoding="utf-8", errors="replace") as fp:
+                            fp.seek(pos)
+                            for ln in fp.read().splitlines():
+                                if ln.strip(): logline(ln)
+                    except Exception: pass
+                    break
+                time.sleep(0.2)
+        except Exception as e:
+            logline(f"ОШИБКА: {e}")
+        finally:
+            try: os.remove(progfile)
+            except Exception: pass
         q.put(("__done__",))
     def start():
         src = path_var.get().strip('"')
@@ -181,9 +214,20 @@ def compress_file(src, qn, log=print):
     return dst
 
 def main():
-    # CLI: <файл> <битность> → сразу жмём. Иначе → GUI.
+    # CLI: <файл> <битность> [progfile] → жмём. Иначе → GUI.
     if len(sys.argv) > 2 and os.path.isfile(sys.argv[1].strip('"')):
-        compress_file(sys.argv[1].strip('"'), sys.argv[2].upper()); return
+        src = sys.argv[1].strip('"'); qn = sys.argv[2].upper()
+        progfile = sys.argv[3] if len(sys.argv) > 3 else None
+        if progfile:
+            def log(m):
+                try:
+                    with open(progfile, "a", encoding="utf-8") as pf: pf.write(m + "\n")
+                except Exception: pass
+            compress_file(src, qn, log)
+        else:
+            def log(m): print(m, flush=True)
+            compress_file(src, qn, log)
+        return
     prefill = sys.argv[1].strip('"') if len(sys.argv) > 1 and os.path.isfile(sys.argv[1].strip('"')) else ""
     run_gui(prefill)
 
