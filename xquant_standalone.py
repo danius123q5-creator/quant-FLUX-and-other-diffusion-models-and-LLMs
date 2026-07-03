@@ -7,6 +7,8 @@ Deps (лёгкие, без torch): numpy, gguf, safetensors(header-only). → ex
 Запуск:  xquant_standalone.py <model.safetensors> [Q4_0|Q3_K|Q2_K]
 """
 import os, sys, json, struct, numpy as np
+try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception: pass
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import xquant as xq
 import xgguf                                   # НАШ GGUF-писатель (без чужой gguf-либы)
@@ -35,7 +37,7 @@ def detect_arch(keys):
     if any("double_blocks" in k for k in ks): return "flux"
     if any("transformer_blocks" in k for k in ks): return "sd3"
     if any("input_blocks" in k for k in ks): return "sdxl"
-    raise SystemExit("Не распознал архитектуру модели")
+    raise SystemExit("Unknown model architecture")
 
 def strip_prefix(keys):
     for p in ("model.diffusion_model.", "model."):
@@ -87,11 +89,11 @@ def main():
         print("USAGE: xquant_standalone <model.safetensors> [Q4_0|Q3_K|Q2_K]"); return
     src = sys.argv[1].strip('"')
     qn = (sys.argv[2] if len(sys.argv) > 2 else "Q2_K").upper()
-    if not os.path.isfile(src): print("НЕТ ФАЙЛА:", src); return
+    if not os.path.isfile(src): print("NO FILE:", src); return
     keys = [k for k,_,_,_ in _iter_hdr(src)]
     pfx = strip_prefix(keys)
     arch = detect_arch([k[len(pfx):] if pfx else k for k in keys])
-    print(f"XQUANT: {os.path.basename(src)}  арх={arch}  → {qn}  (движок: наш, без чужого)")
+    print(f"XQUANT: {os.path.basename(src)}  arch={arch}  -> {qn}  (own engine, zero third-party)")
     fn, ggtype, blk = OUR.get(qn, (None,None,32))
     nq = nf = 0
     out = []   # (name, ggml_type, logical_shape, data_bytes)
@@ -115,11 +117,11 @@ def main():
         else:
             out.append((key, xgguf.T.F16, tuple(shape), xgguf.enc_f16(data)))
         total += 1
-        if total % 100 == 0: print(f"  обработано {total} тензоров...", flush=True)
+        if total % 100 == 0: print(f"  processed {total} tensors...", flush=True)
     dst = os.path.splitext(src)[0] + f"-{qn}.gguf"
-    print(f"пишу GGUF ({len(out)} тензоров)...")
+    print(f"writing GGUF ({len(out)} tensors)...")
     xgguf.write_gguf(dst, arch, out)
-    print(f"ужато нашим ядром: {nq} | F16: {nf}\nГОТОВО: {dst}  {os.path.getsize(src)/1e9:.1f}→{os.path.getsize(dst)/1e9:.1f} ГБ")
+    print(f"quantized: {nq} | F16: {nf}\nDONE: {dst}  {os.path.getsize(src)/1e9:.1f}->{os.path.getsize(dst)/1e9:.1f} GB")
 
 def _iter_hdr(path):
     with open(path,"rb") as f:
