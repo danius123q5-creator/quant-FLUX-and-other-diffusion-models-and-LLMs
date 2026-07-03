@@ -118,6 +118,24 @@ def run_gui(prefill=""):
     ttk.Combobox(bf, textvariable=bit_var, values=[b[0] for b in _BITS],
                  state="readonly", width=32).pack(side="left", padx=8)
 
+    # папка результата (пусто = рядом с исходником)
+    of = tk.Frame(root); of.pack(fill="x", padx=18, pady=(0,2))
+    tk.Label(of, text="Папка результата:", font=("Segoe UI", 9), fg="#888").grid(row=0, column=0, sticky="w")
+    out_var = tk.StringVar(value="")
+    tk.Entry(of, textvariable=out_var).grid(row=1, column=0, sticky="we", pady=2)
+    def browse_out():
+        d = filedialog.askdirectory(title="Куда сохранить результат")
+        if d: out_var.set(d)
+    tk.Button(of, text="Обзор…", command=browse_out).grid(row=1, column=1, padx=(6,0))
+    def open_out():
+        d = out_var.get().strip() or (os.path.dirname(path_var.get().strip('"')) if path_var.get() else "")
+        if d and os.path.isdir(d):
+            try: os.startfile(d)
+            except Exception as e: logline(f"открыть не удалось: {e}")
+    tk.Button(of, text="📂 Открыть", command=open_out).grid(row=1, column=2, padx=(6,0))
+    tk.Label(of, text="(пусто = рядом с исходником)", font=("Segoe UI", 8), fg="#666").grid(row=2, column=0, sticky="w")
+    of.columnconfigure(0, weight=1)
+
     log = tk.Text(root, height=9, width=64, font=("Consolas", 9), bg="#111", fg="#ddd")
     log.pack(fill="both", expand=True, padx=18, pady=(8,4))
     q = queue.Queue()
@@ -166,6 +184,9 @@ def run_gui(prefill=""):
         src = path_var.get().strip('"')
         if not os.path.isfile(src): logline("Выбери файл модели!"); return
         qn = dict(_BITS)[bit_var.get()]
+        od = out_var.get().strip()
+        if od and os.path.isdir(od): os.environ["XQUANT_OUT_DIR"] = od       # наследуется subprocess'ом
+        else: os.environ.pop("XQUANT_OUT_DIR", None)
         log.delete("1.0","end"); btn.config(state="disabled", text="жму…")
         threading.Thread(target=worker, args=(src, qn), daemon=True).start()
     btn.config(command=start)
@@ -247,6 +268,13 @@ def load_tensors(path):
 
 CRITICAL = xq.is_critical  # универсальная защита слоёв
 
+def _out_path(src, qn):
+    """Путь результата: env XQUANT_OUT_DIR если задан, иначе рядом с исходником."""
+    base = os.path.splitext(os.path.basename(src))[0] + f"-{qn}.gguf"
+    od = os.environ.get("XQUANT_OUT_DIR", "").strip()
+    if od and os.path.isdir(od): return os.path.join(od, base)
+    return os.path.splitext(src)[0] + f"-{qn}.gguf"
+
 def compress_file(src, qn, log=print):
     """Сжать модель src в битность qn. log(msg) — колбэк прогресса. Возвращает dst."""
     keys = [k for k,_,_,_ in _iter_hdr(src)]
@@ -270,7 +298,7 @@ def compress_file(src, qn, log=print):
             out.append((key, xgguf.T.F16, tuple(shape), xgguf.enc_f16(data)))
         total += 1
         if total % 100 == 0: log(f"  обработано {total} тензоров...")
-    dst = os.path.splitext(src)[0] + f"-{qn}.gguf"
+    dst = _out_path(src, qn)
     log(f"пишу GGUF ({len(out)} тензоров)...")
     xgguf.write_gguf(dst, arch, out)
     log(f"ГОТОВО: {os.path.basename(dst)}  {os.path.getsize(src)/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ")
@@ -289,7 +317,7 @@ def requantize_gguf(src, qn, log=print):
     fsize = os.path.getsize(src)
     offs = [t[3] for t in tinfos]
     fn, ggtype, blk = OUR.get(qn, (None, None, 32))
-    out = []; nq = nf = npass = 0
+    out = []; nq = nf = npass = 0; src_types = {}
     log(f"{os.path.basename(src)}  тензоров={len(tinfos)}  -> {qn} (LLM requant)")
     for i, (name, dims, tt, off) in enumerate(tinfos):
         start = data_start + off
@@ -297,22 +325,38 @@ def requantize_gguf(src, qn, log=print):
         f.seek(start); raw = f.read(end - start)
         shape = tuple(reversed(dims))                    # ggml ne → numpy shape
         nelem = int(np.prod(shape)) if shape else 1
-        data = xgguf.dec_source(raw, tt, nelem)
-        if data is None:                                 # уже квант/неизвестный → как есть
-            out.append((name, tt, dims, raw)); npass += 1
-        elif fn and len(shape) == 2 and nelem > QUANT_THRESHOLD and not llm_critical(name) and shape[1] % blk == 0:
-            try: out.append((name, ggtype, dims, fn(data.reshape(shape)).tobytes())); nq += 1
-            except Exception: out.append((name, xgguf.T.F16, dims, xgguf.enc_f16(data))); nf += 1
-        elif len(shape) == 1:
-            out.append((name, xgguf.T.F32, dims, xgguf.enc_f32(data))); nf += 1
+        if len(shape) == 2 and nelem > QUANT_THRESHOLD:
+            src_types[tt] = src_types.get(tt, 0) + 1     # тип больших source-тензоров
+        # реквантуем ТОЛЬКО большие 2D-веса; всё остальное (крит-слои, нормы,
+        # мелочь) пропускаем КАК ЕСТЬ в исходном типе — без раздувания в F16.
+        can = (fn and len(shape) == 2 and nelem > QUANT_THRESHOLD
+               and not llm_critical(name) and shape[1] % blk == 0)
+        if can:
+            data = xgguf.dec_source(raw, tt, nelem)      # распаковка источника
+            if data is None:                             # неизвестный квант → как есть
+                out.append((name, tt, dims, raw)); npass += 1
+            else:
+                try: out.append((name, ggtype, dims, fn(data.reshape(shape)).tobytes())); nq += 1
+                except Exception: out.append((name, tt, dims, raw)); npass += 1
         else:
-            out.append((name, xgguf.T.F16, dims, xgguf.enc_f16(data))); nf += 1
+            out.append((name, tt, dims, raw)); npass += 1
         if (i+1) % 100 == 0: log(f"  requant {i+1}/{len(tinfos)}...")
     f.close()
-    dst = os.path.splitext(src)[0] + f"-{qn}.gguf"
+    # оценка «битности»: тип, которым представлено БОЛЬШИНСТВО больших тензоров
+    _BITS_OF = {xgguf.T.F32:32, xgguf.T.F16:16, xgguf.T.BF16:16, xgguf.T.Q8_0:8.5,
+                xgguf.T.Q6_K:6.6, 13:5.5, xgguf.T.Q5_0:5.5, 12:4.5, xgguf.T.Q4_0:4.5,
+                xgguf.T.Q3_K:3.4, xgguf.T.Q2_K:2.6}
+    _TGT_BITS = {"Q8_0":8.5,"Q6_K":6.6,"Q5_0":5.5,"Q4_0":4.5,"Q3_K":3.4,"Q2_K":2.6}
+    src_bits = _BITS_OF.get(max(src_types, key=src_types.get), 16) if src_types else 16
+    tgt_bits = _TGT_BITS.get(qn, 4.5)
+    if src_bits < 9:  # источник уже лоссовый (не F16/F32/Q8) → двойная потеря
+        log(f"⚠️ ВНИМАНИЕ: источник УЖЕ квантован (~{src_bits:.1f} бит). Реквант в {qn} "
+            f"(~{tgt_bits:.1f} бит) = ДВОЙНАЯ потеря — качество LLM просядет.")
+        log("   Идеал: брать F16/BF16 или Q8_0 версию модели. Особенно не жми в Q2/Q3.")
+    dst = _out_path(src, qn)
     log(f"пишу LLM GGUF ({len(out)} тензоров, метадата+токенайзер сохранены)...")
     xgguf.write_gguf_raw(dst, raw_meta, n_kv, out)
-    log(f"ГОТОВО: {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (квант {nq}, F16 {nf}, как-есть {npass})")
+    log(f"ГОТОВО: {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (реквант {nq}, как-есть {npass})")
     return dst
 
 def process(src, qn, log=print):

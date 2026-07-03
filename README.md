@@ -18,13 +18,20 @@ no City96 `convert.py`, no torch:
 ## LLM requantization (GGUF → GGUF, no re-download)
 Drop an existing **LLM GGUF** (from LM Studio etc.) and shrink it further —
 no need to download the raw 15 GB safetensors. XQuant reads the GGUF, dequantizes
-weights in RAM (F16 / BF16 / F32 / Q8_0 source), applies critical-layer protection,
-and repacks to 2/3/4/5/6/8-bit — **preserving all metadata and the tokenizer**
-verbatim (raw KV passthrough), so the result loads in llama.cpp / LM Studio.
+weights in RAM, applies critical-layer protection, and repacks to any of
+2/3/4/5/6/8-bit — **preserving all metadata and the tokenizer** verbatim (raw KV
+passthrough), so the result loads in llama.cpp / LM Studio.
+
+**Any source quant is unpacked** — our own numpy dequantizers for
+`Q4_0` / `Q5_0` / `Q2_K` / `Q3_K` / `Q4_K` / `Q5_K` / `Q6_K` / `Q8_0` / `F16` /
+`BF16` / `F32` are **byte-for-byte identical** to the `gguf` reference
+(`dequantize`), so even a `Q4_K_M` from LM Studio re-packs correctly.
 ```
-XQuant.exe model-F16.gguf Q4_0        # 8-bit/F16 LLM → 4-bit, tokenizer intact
+XQuant.exe model-Q4_K_M.gguf Q3_K     # existing LM-Studio quant → smaller, tokenizer intact
 ```
-(Best source = F16 or Q8_0. Re-quantizing an already-lossy K-quant is skipped.)
+Best source is still **F16 or Q8_0** — re-quantizing an already-lossy K-quant
+(e.g. `Q4_K_M → Q2_K`) compounds error (double loss); the tool warns you when
+the source is already low-bit.
 
 ## Universal critical-layer protection
 Input embeddings, the output projection to the VAE (`final_layer` / `conv_out` /
