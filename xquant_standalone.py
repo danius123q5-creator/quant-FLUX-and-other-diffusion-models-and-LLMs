@@ -44,7 +44,9 @@ def run_gui(prefill=""):
     path_var = tk.StringVar(value=prefill)
     ent = tk.Entry(frm, textvariable=path_var, width=48); ent.grid(row=1, column=0, sticky="we", pady=2)
     def browse():
-        p = filedialog.askopenfilename(filetypes=[("Safetensors","*.safetensors"),("All","*.*")])
+        p = filedialog.askopenfilename(filetypes=[("Модели","*.safetensors *.gguf"),
+                                                  ("Safetensors","*.safetensors"),
+                                                  ("GGUF (LLM)","*.gguf"),("All","*.*")])
         if p: path_var.set(p)
     tk.Button(frm, text="Обзор…", command=browse).grid(row=1, column=1, padx=(6,0))
     frm.columnconfigure(0, weight=1)
@@ -213,6 +215,51 @@ def compress_file(src, qn, log=print):
     log(f"ГОТОВО: {os.path.basename(dst)}  {os.path.getsize(src)/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ")
     return dst
 
+def llm_critical(name):
+    """Критические слои LLM → держим F16 (вход-эмбеды/выход/нормы), не крушим."""
+    n = name.lower()
+    return ("token_embd" in n or n == "output.weight" or "_norm" in n
+            or ".norm" in n or "rope_freqs" in n)
+
+def requantize_gguf(src, qn, log=print):
+    """LLM-сжатие: реквантизация существующего GGUF (F16/BF16/Q8 → Q4/Q3/Q2...).
+    Метадата+токенайзер копируются сырыми байтами (llama.cpp/LM Studio читают)."""
+    f, ver, raw_meta, n_kv, tinfos, data_start, align = xgguf.read_gguf(src)
+    fsize = os.path.getsize(src)
+    offs = [t[3] for t in tinfos]
+    fn, ggtype, blk = OUR.get(qn, (None, None, 32))
+    out = []; nq = nf = npass = 0
+    log(f"{os.path.basename(src)}  тензоров={len(tinfos)}  -> {qn} (LLM requant)")
+    for i, (name, dims, tt, off) in enumerate(tinfos):
+        start = data_start + off
+        end = data_start + offs[i+1] if i+1 < len(tinfos) else fsize
+        f.seek(start); raw = f.read(end - start)
+        shape = tuple(reversed(dims))                    # ggml ne → numpy shape
+        nelem = int(np.prod(shape)) if shape else 1
+        data = xgguf.dec_source(raw, tt, nelem)
+        if data is None:                                 # уже квант/неизвестный → как есть
+            out.append((name, tt, dims, raw)); npass += 1
+        elif fn and len(shape) == 2 and nelem > QUANT_THRESHOLD and not llm_critical(name) and shape[1] % blk == 0:
+            try: out.append((name, ggtype, dims, fn(data.reshape(shape)).tobytes())); nq += 1
+            except Exception: out.append((name, xgguf.T.F16, dims, xgguf.enc_f16(data))); nf += 1
+        elif len(shape) == 1:
+            out.append((name, xgguf.T.F32, dims, xgguf.enc_f32(data))); nf += 1
+        else:
+            out.append((name, xgguf.T.F16, dims, xgguf.enc_f16(data))); nf += 1
+        if (i+1) % 100 == 0: log(f"  requant {i+1}/{len(tinfos)}...")
+    f.close()
+    dst = os.path.splitext(src)[0] + f"-{qn}.gguf"
+    log(f"пишу LLM GGUF ({len(out)} тензоров, метадата+токенайзер сохранены)...")
+    xgguf.write_gguf_raw(dst, raw_meta, n_kv, out)
+    log(f"ГОТОВО: {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (квант {nq}, F16 {nf}, как-есть {npass})")
+    return dst
+
+def process(src, qn, log=print):
+    """.gguf → LLM requant (метадата+токенайзер сохранены); .safetensors → диффузия."""
+    if src.lower().endswith(".gguf"):
+        return requantize_gguf(src, qn, log)
+    return compress_file(src, qn, log)
+
 def main():
     # CLI: <файл> <битность> [progfile] → жмём. Иначе → GUI.
     if len(sys.argv) > 2 and os.path.isfile(sys.argv[1].strip('"')):
@@ -223,10 +270,10 @@ def main():
                 try:
                     with open(progfile, "a", encoding="utf-8") as pf: pf.write(m + "\n")
                 except Exception: pass
-            compress_file(src, qn, log)
+            process(src, qn, log)
         else:
             def log(m): print(m, flush=True)
-            compress_file(src, qn, log)
+            process(src, qn, log)
         return
     prefill = sys.argv[1].strip('"') if len(sys.argv) > 1 and os.path.isfile(sys.argv[1].strip('"')) else ""
     run_gui(prefill)

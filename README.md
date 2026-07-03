@@ -15,6 +15,17 @@ no City96 `convert.py`, no torch:
 - **`xquant_standalone.py`** — own safetensors reader (manual `bf16`/`fp16`/`fp8`
   decode) + own architecture detection. **No external quantizer code.**
 
+## LLM requantization (GGUF → GGUF, no re-download)
+Drop an existing **LLM GGUF** (from LM Studio etc.) and shrink it further —
+no need to download the raw 15 GB safetensors. XQuant reads the GGUF, dequantizes
+weights in RAM (F16 / BF16 / F32 / Q8_0 source), applies critical-layer protection,
+and repacks to 2/3/4/5/6/8-bit — **preserving all metadata and the tokenizer**
+verbatim (raw KV passthrough), so the result loads in llama.cpp / LM Studio.
+```
+XQuant.exe model-F16.gguf Q4_0        # 8-bit/F16 LLM → 4-bit, tokenizer intact
+```
+(Best source = F16 or Q8_0. Re-quantizing an already-lossy K-quant is skipped.)
+
 ## Universal critical-layer protection
 Input embeddings, the output projection to the VAE (`final_layer` / `conv_out` /
 `proj_out`), and norms are kept in `bf16` for **every** architecture — so the VAE
