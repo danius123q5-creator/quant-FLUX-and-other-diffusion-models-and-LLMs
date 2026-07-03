@@ -43,7 +43,7 @@ connection is never broken (the classic sub-4-bit "colour noise").
 |---|---|---|---|
 | fp16 | 23.8 GB | — | reference |
 | 4-bit Q4_0 | 6.4 GB | ~25 dB | perfect, indistinguishable |
-| 3-bit Q3_K | ~5 GB | ~18 dB | balanced |
+| 3-bit Q3_K | ~5 GB | ~18 dB | visible grain — not recommended for FLUX |
 | **2-bit Q2_K** | **4.0 GB** | ~19 dB | **size/quality sweet spot** |
 
 **Post-hoc quantization floor ≈ 2-bit.** Below that (ternary 1.6-bit) quality

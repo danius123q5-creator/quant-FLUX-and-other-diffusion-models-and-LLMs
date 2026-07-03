@@ -6,7 +6,7 @@
 Deps (лёгкие, без torch): numpy, gguf, safetensors(header-only). → exe ~150МБ.
 Запуск:  xquant_standalone.py <model.safetensors> [Q4_0|Q3_K|Q2_K]
 """
-import os, sys, json, struct, time, numpy as np
+import os, sys, json, struct, time, re, numpy as np
 
 def _fmt_dur(sec):
     """Секунды → человекочитаемо: '45.3с' / '2м 05с' / '1ч 03м'."""
@@ -33,6 +33,28 @@ OUR = {"Q8_0": (xq.our_quantize_q8_0, xgguf.T.Q8_0, 32),
 _BITS = [("8-бит (Q8_0) — почти без потерь","Q8_0"), ("6-бит (Q6_K) — высокое","Q6_K"),
          ("5-бит (Q5_0) — высокое","Q5_0"), ("4-бит (Q4_0) — идеал/баланс","Q4_0"),
          ("3-бит (Q3_K) — компактно","Q3_K"), ("2-бит (Q2_K) — минимум","Q2_K")]
+
+# ── СМЕШАННЫЙ квант (аналог Q3_K_M): чувствительные слои — на тип выше ──
+# Слои, что кормят ОСТАТОЧНЫЙ поток (выходные проекции attn + down-проекции MLP),
+# при 3/2-бит дают основной шум/«зерно». Держим их на ступень выше — зерно уходит,
+# размер растёт незначительно. Выкл: XQUANT_MIXED=0. 2026-07-04.
+_SENSITIVE_RE = re.compile(
+    # diffusion: FLUX (img/txt_attn.proj, img/txt_mlp.2, single linear2) + generic DiT
+    r"attn\.proj\.weight$|_mlp\.2\.weight$|linear2\.weight$"
+    r"|\.to_out\.0\.weight$|ff\.net\.2\.weight$|mlp\.fc2\.weight$"
+    # LLM (llama.cpp ggml-ключи): ffn_down / attn_output / attn_v
+    r"|ffn_down\.weight$|attn_output\.weight$|attn_v\.weight$",
+    re.IGNORECASE)
+_UPGRADE = {"Q3_K": "Q5_0", "Q2_K": "Q4_0"}   # база → тип для чувствительных
+
+def _eff_quant(key, qn):
+    """Эффективный квант слоя: чувствительным при Q3_K/Q2_K даём ступень выше."""
+    if os.environ.get("XQUANT_MIXED", "1").strip().lower() in ("0","off","no","false"):
+        return qn
+    up = _UPGRADE.get(qn)
+    if up and _SENSITIVE_RE.search(key):
+        return up
+    return qn
 
 def find_model_dirs():
     """Авто-детект папок моделей ComfyUI + LM Studio (существующие)."""
@@ -200,12 +222,19 @@ def run_gui(prefill=""):
         threading.Thread(target=worker, args=(src, qn), daemon=True).start()
     btn.config(command=start)
 
+    last_prog = [False]   # прошлая строка была прогресс-тиком → обновляем на месте
     def poll():
         try:
             while True:
                 m = q.get_nowait()
-                if isinstance(m, tuple): btn.config(state="normal", text="СЖАТЬ")
-                else: log.insert("end", m+"\n"); log.see("end")
+                if isinstance(m, tuple):
+                    btn.config(state="normal", text="СЖАТЬ"); last_prog[0] = False
+                else:
+                    is_prog = ("тензоров..." in m and "/" in m)   # «обработано N/M тензоров...»
+                    if is_prog and last_prog[0]:
+                        log.delete("end-1l", "end")   # заменить прошлый тик → счётчик тикает на месте
+                    log.insert("end", m+"\n"); log.see("end")
+                    last_prog[0] = is_prog
         except queue.Empty: pass
         root.after(120, poll)
     poll()
@@ -291,26 +320,32 @@ def compress_file(src, qn, log=print):
     keys = [k for k,_,_,_ in _iter_hdr(src)]
     pfx = strip_prefix(keys)
     arch = detect_arch([k[len(pfx):] if pfx else k for k in keys])
-    log(f"{os.path.basename(src)}  arch={arch}  ->  {qn}")
-    fn, ggtype, blk = OUR.get(qn, (None,None,32))
-    nq = nf = 0; out = []; total = 0
+    mixed = qn in _UPGRADE and os.environ.get("XQUANT_MIXED","1").strip().lower() not in ("0","off","no","false")
+    log(f"{os.path.basename(src)}  arch={arch}  ->  {qn}{' (mixed: чувств.→'+_UPGRADE[qn]+')' if mixed else ''}")
+    base_fn = OUR.get(qn, (None,None,32))[0]
+    n_total = len(keys)
+    nq = nf = nup = 0; out = []; total = 0
     for k, dt, shape, raw in load_tensors(src):
         if pfx and not k.startswith(pfx): continue
         key = k[len(pfx):] if pfx and k.startswith(pfx) else k
         if dt not in ("F32","F16","BF16","F8_E4M3","F8_E5M2"): continue
         data = _decode(raw, dt, shape)
         nd = len(shape); npm = int(np.prod(shape)) if shape else 1
+        eff = _eff_quant(key, qn) if base_fn else qn        # чувствит. слой → ступень выше
+        fn, ggtype, blk = OUR.get(eff, (None,None,32))
         if (fn and nd==2 and npm>QUANT_THRESHOLD and not CRITICAL(key) and shape[1] % blk == 0):
-            try: out.append((key, ggtype, tuple(shape), fn(data).tobytes())); nq += 1
+            try:
+                out.append((key, ggtype, tuple(shape), fn(data).tobytes())); nq += 1
+                if eff != qn: nup += 1
             except Exception: out.append((key, xgguf.T.F16, tuple(shape), xgguf.enc_f16(data))); nf += 1
         elif nd == 1 or npm <= QUANT_THRESHOLD:
             out.append((key, xgguf.T.F32, tuple(shape), xgguf.enc_f32(data)))
         else:
             out.append((key, xgguf.T.F16, tuple(shape), xgguf.enc_f16(data)))
         total += 1
-        if total % 100 == 0: log(f"  обработано {total} тензоров...")
+        if total % 10 == 0: log(f"  обработано {total}/{n_total} тензоров...")
     dst = _out_path(src, qn)
-    log(f"пишу GGUF ({len(out)} тензоров)...")
+    log(f"пишу GGUF ({len(out)} тензоров{', '+str(nup)+' чувств.→'+_UPGRADE[qn] if nup else ''})...")
     xgguf.write_gguf(dst, arch, out)
     log(f"ГОТОВО: {os.path.basename(dst)}  {os.path.getsize(src)/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  за {_fmt_dur(time.time()-t0)}")
     return dst
@@ -328,9 +363,10 @@ def requantize_gguf(src, qn, log=print):
     f, ver, raw_meta, n_kv, tinfos, data_start, align = xgguf.read_gguf(src)
     fsize = os.path.getsize(src)
     offs = [t[3] for t in tinfos]
-    fn, ggtype, blk = OUR.get(qn, (None, None, 32))
-    out = []; nq = nf = npass = 0; src_types = {}
-    log(f"{os.path.basename(src)}  тензоров={len(tinfos)}  -> {qn} (LLM requant)")
+    base_fn = OUR.get(qn, (None, None, 32))[0]
+    mixed = qn in _UPGRADE and os.environ.get("XQUANT_MIXED","1").strip().lower() not in ("0","off","no","false")
+    out = []; nq = nf = npass = nup = 0; src_types = {}
+    log(f"{os.path.basename(src)}  тензоров={len(tinfos)}  -> {qn} (LLM requant){' mixed' if mixed else ''}")
     for i, (name, dims, tt, off) in enumerate(tinfos):
         start = data_start + off
         end = data_start + offs[i+1] if i+1 < len(tinfos) else fsize
@@ -341,6 +377,8 @@ def requantize_gguf(src, qn, log=print):
             src_types[tt] = src_types.get(tt, 0) + 1     # тип больших source-тензоров
         # реквантуем ТОЛЬКО большие 2D-веса; всё остальное (крит-слои, нормы,
         # мелочь) пропускаем КАК ЕСТЬ в исходном типе — без раздувания в F16.
+        eff = _eff_quant(name, qn) if base_fn else qn    # чувствит. слой → ступень выше
+        fn, ggtype, blk = OUR.get(eff, (None, None, 32))
         can = (fn and len(shape) == 2 and nelem > QUANT_THRESHOLD
                and not llm_critical(name) and shape[1] % blk == 0)
         if can:
@@ -348,11 +386,13 @@ def requantize_gguf(src, qn, log=print):
             if data is None:                             # неизвестный квант → как есть
                 out.append((name, tt, dims, raw)); npass += 1
             else:
-                try: out.append((name, ggtype, dims, fn(data.reshape(shape)).tobytes())); nq += 1
+                try:
+                    out.append((name, ggtype, dims, fn(data.reshape(shape)).tobytes())); nq += 1
+                    if eff != qn: nup += 1
                 except Exception: out.append((name, tt, dims, raw)); npass += 1
         else:
             out.append((name, tt, dims, raw)); npass += 1
-        if (i+1) % 100 == 0: log(f"  requant {i+1}/{len(tinfos)}...")
+        if (i+1) % 10 == 0: log(f"  обработано {i+1}/{len(tinfos)} тензоров...")
     f.close()
     # оценка «битности»: тип, которым представлено БОЛЬШИНСТВО больших тензоров
     _BITS_OF = {xgguf.T.F32:32, xgguf.T.F16:16, xgguf.T.BF16:16, xgguf.T.Q8_0:8.5,
@@ -372,7 +412,7 @@ def requantize_gguf(src, qn, log=print):
         raw_meta = xgguf.patch_kv_u32(raw_meta, "general.file_type", ft)
     log(f"пишу LLM GGUF ({len(out)} тензоров, метадата+токенайзер сохранены)...")
     xgguf.write_gguf_raw(dst, raw_meta, n_kv, out)
-    log(f"ГОТОВО: {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (реквант {nq}, как-есть {npass})  за {_fmt_dur(time.time()-t0)}")
+    log(f"ГОТОВО: {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (реквант {nq}{', '+str(nup)+' чувств.→'+_UPGRADE[qn] if nup else ''}, как-есть {npass})  за {_fmt_dur(time.time()-t0)}")
     return dst
 
 def process(src, qn, log=print):
