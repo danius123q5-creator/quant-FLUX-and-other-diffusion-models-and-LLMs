@@ -105,39 +105,30 @@ def our_quantize_q6k(x: np.ndarray) -> np.ndarray:
     assert x.size % QK_K == 0
     nb = x.size // QK_K
     xb = x.reshape(nb, QK_K)
-    out = np.zeros((nb, 210), dtype=np.uint8)
     # индекс суб-блока (0..15) для каждой из 256 позиций (раскладка ggml Q6_K)
-    subidx = np.zeros(QK_K, dtype=np.int64)
-    for p in range(QK_K):
-        n = p // 128; o = p % 128; m = o // 32; l = o % 32
-        subidx[p] = (l // 16) + 2*m + 8*n
-    for bi in range(nb):
-        w = xb[bi]
-        # scale на суб-блок = absmax/32
-        lsc = np.zeros(16, np.float32)
-        for s in range(16):
-            mask = subidx == s
-            lsc[s] = np.abs(w[mask]).max() / 32.0
-        d = max(lsc.max(), 1e-8) / 127.0
-        d16 = np.float16(d); d = float(d16)
-        sc = np.clip(np.round(lsc / d), -128, 127).astype(np.int8)
-        # q6 для каждой позиции
-        eff = d * sc[subidx].astype(np.float32)
-        eff[eff == 0] = 1e-8
-        q = np.clip(np.round(w / eff) + 32, 0, 63).astype(np.int32)
-        # упаковка ql[128]+qh[64] по 2 группам 128
-        ql = np.zeros(128, np.uint8); qh = np.zeros(64, np.uint8)
-        for grp in range(2):
-            n = grp*128; qlo = grp*64; qho = grp*32
-            for l in range(32):
-                q1=q[n+l]; q2=q[n+l+32]; q3=q[n+l+64]; q4=q[n+l+96]
-                ql[qlo+l]    = (q1 & 0xF) | ((q3 & 0xF) << 4)
-                ql[qlo+l+32] = (q2 & 0xF) | ((q4 & 0xF) << 4)
-                qh[qho+l] = ((q1>>4)&3) | (((q2>>4)&3)<<2) | (((q3>>4)&3)<<4) | (((q4>>4)&3)<<6)
-        out[bi, 0:128] = ql
-        out[bi, 128:192] = qh
-        out[bi, 192:208] = sc.view(np.uint8)
-        out[bi, 208:210] = np.array([d16], np.float16).view(np.uint8)
+    p = np.arange(QK_K)
+    n_ = p // 128; o = p % 128; m = o // 32; l = o % 32
+    subidx = (l // 16) + 2*m + 8*n_                    # [256]
+    order = np.argsort(subidx, kind="stable")          # позиции сгруппированы по суб-блоку
+    # scale на суб-блок = absmax/32 (ВЕКТОРНО по всем nb)
+    grouped = xb[:, order].reshape(nb, 16, 16)         # [nb,16 суб,16]
+    lsc = np.abs(grouped).max(axis=2) / 32.0           # [nb,16]
+    d = np.maximum(lsc.max(axis=1, keepdims=True), 1e-8) / 127.0   # [nb,1]
+    d16 = d.reshape(nb).astype(np.float16); d = d16.astype(np.float32).reshape(nb, 1)
+    sc = np.clip(np.round(lsc / d), -128, 127).astype(np.int8)     # [nb,16]
+    eff = (d * sc.astype(np.float32))[:, subidx]        # [nb,256]
+    eff[eff == 0] = 1e-8
+    q = np.clip(np.round(xb / eff) + 32, 0, 63).astype(np.int32)   # [nb,256]
+    # упаковка ql[128]+qh[64] — 2 группы, ВЕКТОРНО (без цикла по l)
+    ql = np.zeros((nb, 128), np.uint8); qh = np.zeros((nb, 64), np.uint8)
+    for grp in range(2):
+        n = grp*128; qlo = grp*64; qho = grp*32
+        q1 = q[:, n:n+32]; q2 = q[:, n+32:n+64]; q3 = q[:, n+64:n+96]; q4 = q[:, n+96:n+128]
+        ql[:, qlo:qlo+32]      = ((q1 & 0xF) | ((q3 & 0xF) << 4)).astype(np.uint8)
+        ql[:, qlo+32:qlo+64]   = ((q2 & 0xF) | ((q4 & 0xF) << 4)).astype(np.uint8)
+        qh[:, qho:qho+32] = (((q1>>4)&3) | (((q2>>4)&3)<<2) | (((q3>>4)&3)<<4) | (((q4>>4)&3)<<6)).astype(np.uint8)
+    d16b = d16.view(np.uint8).reshape(nb, 2)
+    out = np.concatenate([ql, qh, sc.view(np.uint8), d16b], axis=1)   # [nb,210]
     return out.reshape(-1)
 
 def our_dequantize_q4_0(blocks: np.ndarray, n: int) -> np.ndarray:
