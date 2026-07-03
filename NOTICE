@@ -1,0 +1,6 @@
+XQuant — свой квантайзер диффузионных моделей.
+Copyright (C) 2026  danius.
+
+Использует ComfyUI-GGUF tools/convert.py (c) City96, Apache-2.0
+(apache.org/licenses/LICENSE-2.0) — для детекта архитектуры и записи GGUF.
+Формат GGUF/GGML — llama.cpp/ggml. Атрибуция сохранена согласно Apache-2.0.
