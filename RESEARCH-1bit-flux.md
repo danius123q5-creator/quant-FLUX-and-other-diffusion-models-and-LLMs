@@ -23,6 +23,9 @@
   render the image.
 - No "magic recovery island": along the *how-much-you-binarize* axis, death is monotonic.
   Life lives on a different axis — *which layers* you binarize.
+- **The fragile attention can be rescued, training-free, with an orthogonal "box"**
+  (incoherence rotation, QuIP-style): rotate the weights, binarize in the rotated
+  basis, rotate back. Attention that binarized to a dead tile comes back as a **face**.
 
 ## Method
 
@@ -80,6 +83,36 @@ dead; run F (24 % of weights, MLP) is clean. This is consistent with prior quant
 work (attention/qkv carry the sensitive outliers) — here it's just shown directly, in
 pixels, on FLUX. It suggests bits should be spent asymmetrically: MLP can go very low,
 attention must stay high.
+
+## The rescue: an orthogonal "box" for the fragile attention
+
+Run E showed attention is where 1-bit dies (heavy-tailed weights → a single per-row
+scale is hijacked by outliers → tile-death). The fix is **training-free**: wrap each
+attention weight in an orthogonal rotation *before* binarizing, and undo it after.
+
+```
+W_eff = bin(W · R) · Rᵀ          # R = random orthogonal on the input dim
+```
+
+Why it works: the rotation **spreads the outliers** — each rotated row is a mix of many
+weights, so its distribution flattens toward Gaussian (central-limit), a single per-row
+scale now fits *all* of it, and the binarization error drops sharply. This is exactly
+**incoherence processing** (the core of QuIP / QuIP#) — no gradients, no fine-tuning. In
+deployment R is free to store (a Hadamard transform, or a seed) and is absorbed into the
+activations at compute time; for this render we store the mathematically-equivalent
+effective weight so a stock loader reproduces the same result.
+
+| run | attention (same tensors) | result | image |
+|---|---|---|---|
+| E | naive per-channel binary | 🧵 dead **tile** | ![](media/1bit_study/attn_only_tile.png) |
+| **E-box** | **binary inside an orthogonal box** | 🟢 **a face returns** | ![](media/1bit_study/box_attn_rescued.png) |
+
+The **only** difference between these two is the rotation. Same weights, same 1-bit
+attention — the box is what brings the fragile organ back to life. It's not pixel-perfect
+(a faint mesh remains), but it turns *total death* into a *recognizable portrait*, which
+is the whole ballgame for the layer that was killing us. Combined with the MLP-is-robust
+finding, this is the honest path toward genuinely-low-bit-but-alive: **MLP binarized
+directly, attention binarized inside a box.**
 
 ## Honest limitations (read before getting excited)
 
