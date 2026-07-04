@@ -43,13 +43,15 @@ damage of that quantization, with no custom loader needed.
 
 | # | What is binarized | adaLN (modulation) | Result | Image |
 |---|---|---|---|---|
-| ref | nothing — Q2_K GGUF (2.6-bit) | — | 🟢 clean fisherman | ![](media/1bit_study/q2k_reference.png) |
+| **fp16** | **nothing — original 23.8 GB** | — | 🟢 **reference (gold standard)** | ![](media/1bit_study/fp16_reference.png) |
+| ref | nothing — Q2_K GGUF (2.6-bit) | — | 🟢 clean, ≈ fp16 | ![](media/1bit_study/q2k_reference.png) |
 | A | ~34 % (middle blocks) | fp16 | 🟢 clean, ≈ Q2_K | ![](media/1bit_study/bin34_alive.png) |
 | B | ~55 % (fewer blocks protected) | fp16 | 👻 ghost / mush face | ![](media/1bit_study/bin55_ghost.png) |
 | C | ~72 % (all attn+mlp) | **fp16** | ⬜ smooth **void** | ![](media/1bit_study/bin72_void.png) |
 | D | ~99 % (everything) | **1-bit** | ❄️ colour **noise** | ![](media/1bit_study/bin99_noise.png) |
 | E | attention only (~12 %) | fp16 | 🧵 woven **tile** | ![](media/1bit_study/attn_only_tile.png) |
 | F | MLP only (~24 %) | fp16 | 🟢 clean fisherman | ![](media/1bit_study/mlp_only_alive.png) |
+| G | attn **+** MLP, double-blocks (~36 %) | fp16 | 🎭 **hybrid** — mushy face **with** a woven-mesh overlay: signatures of E **and** F superimposed (single-block attention, kept fp16, holds the composition) | ![](media/1bit_study/door35_hybrid.png) |
 
 (For contrast, a naive **product/vector-quant at 2-bit with no per-channel structure**
 renders pure noise — cosine 0.944 notwithstanding: ![](media/1bit_study/pq_2bit_noise.png))
@@ -66,7 +68,10 @@ renders pure noise — cosine 0.944 notwithstanding: ![](media/1bit_study/pq_2bi
    effectively translation-invariant → a regular repeating weave, no composition.
 
 The same corpse, three different ways to die — controlled independently by which
-subsystem you break.
+subsystem you break. And they **superimpose**: run G (binarize attention *and* MLP in the
+double-blocks) shows both signatures at once — a soft, degraded face (feature loss) with a
+woven-mesh stamped over it (spatial loss), while the single-blocks' fp16 attention still
+holds a rough composition together.
 
 ## The one finding worth keeping
 
