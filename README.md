@@ -1,5 +1,7 @@
 # Жматель (XQuant) — custom diffusion-model quantizer (zero third-party engine)
 
+**🇬🇧 English** · [🇷🇺 Русский](README.ru.md)
+
 Compress diffusion models (FLUX / SDXL / SD1.5 / SD3 / Qwen-Image / Wan …) to
 **2 / 3 / 4-bit GGUF** with a quantization engine written **entirely from scratch** —
 our own GGML-byte-exact kernel, our own GGUF writer, our own architecture detection.
