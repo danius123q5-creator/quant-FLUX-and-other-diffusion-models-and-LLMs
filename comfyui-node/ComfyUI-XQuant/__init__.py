@@ -59,8 +59,8 @@ class XQuantTernaryLoader:
         return {"required": {"unet_name": (_list_xqt(),)}}
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load"
-    CATEGORY = "XQuant"
-    TITLE = "XQuant Ternary Loader (1.6-bit)"
+    CATEGORY = "Жматель"
+    TITLE = "Жматель Ternary Loader (1.6-bit)"
 
     def load(self, unet_name):
         path = folder_paths.get_full_path("diffusion_models", unet_name) \
@@ -128,8 +128,8 @@ class XQuantGGUFLoader:
         return {"required": {"unet_name": (_list_gguf(),)}}
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load"
-    CATEGORY = "XQuant"
-    TITLE = "XQuant GGUF Loader (2-8bit · image/video/audio)"
+    CATEGORY = "Жматель"
+    TITLE = "Жматель GGUF Loader (2-8bit · image/video/audio)"
 
     def load(self, unet_name):
         path = folder_paths.get_full_path("diffusion_models", unet_name) \
@@ -184,8 +184,8 @@ class XQuantMusicLoader:
         return {"required": {"unet_name": (_list_gguf_music(),)}}
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load"
-    CATEGORY = "XQuant"
-    TITLE = "XQuant Music Loader (Stable Audio / ACE-Step, 2-8bit)"
+    CATEGORY = "Жматель"
+    TITLE = "Жматель Music Loader (Stable Audio / ACE-Step, 2-8bit)"
 
     def load(self, unet_name):
         path = _find_music_path(unet_name)

@@ -32,7 +32,8 @@ OUR = {"Q8_0": (xq.our_quantize_q8_0, xgguf.T.Q8_0, 32),
 
 _BITS = [("8-бит (Q8_0) — почти без потерь","Q8_0"), ("6-бит (Q6_K) — высокое","Q6_K"),
          ("5-бит (Q5_0) — высокое","Q5_0"), ("4-бит (Q4_0) — идеал/баланс","Q4_0"),
-         ("3-бит (Q3_K) — компактно","Q3_K"), ("2-бит (Q2_K) — минимум","Q2_K")]
+         ("3-бит (Q3_K) — компактно","Q3_K"), ("2-бит (Q2_K) — минимум","Q2_K"),
+         ("1-бит (Q1) — ЭКСПЕРИМЕНТ, демо-качества (не сжатие)","Q1")]
 
 # ── СМЕШАННЫЙ квант (аналог Q3_K_M): чувствительные слои — на тип выше ──
 # Слои, что кормят ОСТАТОЧНЫЙ поток (выходные проекции attn + down-проекции MLP),
@@ -97,12 +98,12 @@ def run_gui(prefill=""):
     import tkinter as tk
     from tkinter import ttk, filedialog
     import threading, queue
-    root = tk.Tk(); root.title("XQuant — ужиматель моделей")
+    root = tk.Tk(); root.title("Жматель — ужиматель моделей")
     root.geometry("565x625"); root.minsize(565, 625)   # всегда открывать в этом размере
     try: root.eval('tk::PlaceWindow . center')
     except Exception: pass
 
-    tk.Label(root, text="XQuant", font=("Segoe UI", 18, "bold")).pack(pady=(14,0))
+    tk.Label(root, text="Жматель", font=("Segoe UI", 18, "bold")).pack(pady=(14,0))
     tk.Label(root, text="diffusion model quantizer  •  own engine  •  AGPL-3.0",
              font=("Segoe UI", 9), fg="#888").pack()
 
@@ -410,6 +411,70 @@ def compress_file(src, qn, log=print):
     log(f"ГОТОВО: {os.path.basename(dst)}  {os.path.getsize(src)/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  за {_fmt_dur(time.time()-t0)}")
     return dst
 
+# ── Q1 (experimental) — рецепт из нашего 1-бит исследования (RESEARCH-1bit-flux.md):
+#    MLP → 1-бит (пер-канальный бинар; MLP оказался робастным), attention → Q4
+#    (хрупкий — держим 4 бита), критика/остальное → fp16. Вывод — SIM-safetensors
+#    (fp16, ПОЛНЫЙ размер): это ДЕМО качества экстремального кванта, НЕ сжатие
+#    (в GGUF нет 1-бит типа, грузить нечем). Для оценки, не для деплоя. 2026-07-05.
+def _bin_per_channel(w2d, outlier_p=0.02):
+    """Пер-канальный бинар: sign(w)·mean(|w_row|); топ-2% |w| держим точными. fp32."""
+    scale = np.abs(w2d).mean(axis=1, keepdims=True).astype(np.float32)
+    rec = (np.sign(w2d) * scale).astype(np.float32)
+    flat = w2d.reshape(-1); rf = rec.reshape(-1)
+    k = max(1, int(flat.size * outlier_p))
+    idx = np.argpartition(np.abs(flat), -k)[-k:]
+    rf[idx] = flat[idx]
+    return rf.reshape(w2d.shape)
+
+def _q4_roundtrip(data, shape):
+    """Q4_0 квант→деквант (attention держим в 4 битах). Возвращает fp32."""
+    blk = xq.our_quantize_q4_0(np.ascontiguousarray(data, np.float32).reshape(-1))
+    return xgguf._deq_q4_0(blk.tobytes(), int(np.prod(shape)))
+
+def compress_1bit(src, qn, log=print):
+    """Q1 (experimental): MLP→1-бит, attn→Q4, критика→fp16. Стриминг sim-safetensors."""
+    t0 = time.time()
+    log("!! Q1 — ЭКСПЕРИМЕНТАЛЬНЫЙ режим (research-only).")
+    log("   Рецепт из нашего 1-бит исследования: MLP -> 1-бит, attention -> Q4, критика -> fp16.")
+    log("   Вывод: sim-safetensors в fp16 (ПОЛНЫЙ размер, НЕ сжатие — в GGUF нет 1-бит типа).")
+    log("   Это ДЕМО КАЧЕСТВА экстремального кванта, не для продакшена. Деплой-дно = Q2_K.")
+    keys = [k for k,_,_,_ in _iter_hdr(src)]
+    pfx = strip_prefix(keys)
+    # pass 1 — заголовок (всё F16, формы из источника; тот же порядок, что load_tensors)
+    hdr = {}; off = 0
+    for k, dt, shape, _ in _iter_hdr(src):
+        if pfx and not k.startswith(pfx): continue
+        key = k[len(pfx):] if pfx and k.startswith(pfx) else k
+        nb = int(np.prod(shape)) * 2 if shape else 2
+        hdr[key] = {"dtype":"F16","shape":list(shape),"data_offsets":[off, off+nb]}
+        off += nb
+    hj = json.dumps(hdr, separators=(",",":")).encode("utf-8"); hj += b" "*((8-len(hj)%8)%8)
+    dst = os.path.splitext(_out_path(src, qn))[0] + ".safetensors"
+    n_total = len(hdr); nbin = nq4 = nkeep = 0; done = 0
+    with open(dst, "wb") as w:
+        w.write(struct.pack("<Q", len(hj))); w.write(hj)
+        for k, dt, shape, raw in load_tensors(src):
+            if pfx and not k.startswith(pfx): continue
+            key = k[len(pfx):] if pfx and k.startswith(pfx) else k
+            data = _decode(raw, dt, shape)
+            nd = len(shape); npm = int(np.prod(shape)) if shape else 1
+            nl = key.lower()
+            if nd == 2 and npm > QUANT_THRESHOLD and not CRITICAL(key) and shape[1] % 32 == 0:
+                if "mlp" in nl:
+                    rec = _bin_per_channel(np.ascontiguousarray(data, np.float32).reshape(shape)); nbin += 1
+                elif "attn" in nl:
+                    rec = _q4_roundtrip(data, shape); nq4 += 1
+                else:
+                    rec = data; nkeep += 1
+            else:
+                rec = data; nkeep += 1
+            w.write(np.ascontiguousarray(rec, np.float32).astype(np.float16).tobytes()); del data, rec
+            done += 1
+            if done % 10 == 0: log(f"  обработано {done}/{n_total} (MLP-бинар {nbin}, attn-Q4 {nq4})...")
+    log(f"ГОТОВО (sim): {os.path.basename(dst)}  MLP-бинар={nbin}, attn-Q4={nq4}, fp16={nkeep}  за {_fmt_dur(time.time()-t0)}")
+    log("   ЗАГРУЗКА: обычный UNETLoader (это fp16-safetensors). Ждать деградацию — это 1-бит демо.")
+    return dst
+
 def llm_critical(name):
     """Критические слои LLM → держим F16 (вход-эмбеды/выход/нормы), не крушим."""
     n = name.lower()
@@ -475,8 +540,52 @@ def requantize_gguf(src, qn, log=print):
     log(f"ГОТОВО: {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (реквант {nq}{', '+str(nup)+' чувств.→'+_UPGRADE[qn] if nup else ''}, как-есть {npass})  за {_fmt_dur(time.time()-t0)}")
     return dst
 
+def requantize_gguf_1bit(src, qn, log=print):
+    """LLM Q1 (experimental): ffn(MLP)→1-бит пер-канальный бинар, attn→Q4_0, критика как есть.
+    В GGUF НЕТ 1-бит типа → бинарные ffn пишутся F16: это ДЕМО КАЧЕСТВА, НЕ сжатие (файл не
+    меньше). Метадата+токенайзер сохранены, грузится в llama.cpp/LM Studio, но деградирует."""
+    t0 = time.time()
+    log("!! LLM Q1 — ЭКСПЕРИМЕНТ: ffn -> 1-бит, attn -> Q4.")
+    log("   В GGUF НЕТ 1-бит типа → бинарные ffn хранятся F16: файл НЕ меньше (демо качества,")
+    log("   не сжатие). Реальное дно для деплоя LLM = Q2_K/Q3_K. Это для оценки, не продакшн.")
+    f, ver, raw_meta, n_kv, tinfos, data_start, align = xgguf.read_gguf(src)
+    fsize = os.path.getsize(src); offs = [t[3] for t in tinfos]
+    out = []; nbin = nq4 = npass = 0
+    for i, (name, dims, tt, off) in enumerate(tinfos):
+        start = data_start + off
+        end = data_start + offs[i+1] if i+1 < len(tinfos) else fsize
+        f.seek(start); raw = f.read(end - start)
+        shape = tuple(reversed(dims)); nelem = int(np.prod(shape)) if shape else 1
+        nl = name.lower()
+        big2d = len(shape) == 2 and nelem > QUANT_THRESHOLD and not llm_critical(name) and shape[1] % 32 == 0
+        if big2d and "ffn" in nl:
+            data = xgguf.dec_source(raw, tt, nelem)
+            if data is None: out.append((name, tt, dims, raw)); npass += 1
+            else:
+                rec = _bin_per_channel(np.ascontiguousarray(data, np.float32).reshape(shape))
+                out.append((name, xgguf.T.F16, dims, xgguf.enc_f16(rec))); nbin += 1
+        elif big2d and "attn" in nl:
+            data = xgguf.dec_source(raw, tt, nelem)
+            if data is None: out.append((name, tt, dims, raw)); npass += 1
+            else:
+                out.append((name, xgguf.T.Q4_0, dims, xq.our_quantize_q4_0(np.ascontiguousarray(data, np.float32).reshape(-1)).tobytes())); nq4 += 1
+        else:
+            out.append((name, tt, dims, raw)); npass += 1
+        if (i+1) % 10 == 0: log(f"  обработано {i+1}/{len(tinfos)} (ffn-бинар {nbin}, attn-Q4 {nq4})...")
+    f.close()
+    dst = os.path.splitext(_out_path(src, qn))[0] + ".gguf"
+    log("пишу LLM GGUF (Q1 демо, метадата+токенайзер сохранены)...")
+    xgguf.write_gguf_raw(dst, raw_meta, n_kv, out)
+    log(f"ГОТОВО (Q1 демо): {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (ffn-бинар {nbin}, attn-Q4 {nq4}, как-есть {npass})  за {_fmt_dur(time.time()-t0)}")
+    return dst
+
 def process(src, qn, log=print):
-    """.gguf → LLM requant (метадата+токенайзер сохранены); .safetensors → диффузия."""
+    """.gguf → LLM requant (метадата+токенайзер сохранены); .safetensors → диффузия.
+    Q1 → экспериментальный 1-бит демо (diffusion: sim.safetensors; LLM: sim.gguf)."""
+    if qn.upper() == "Q1":
+        if src.lower().endswith(".gguf"):
+            return requantize_gguf_1bit(src, qn, log)
+        return compress_1bit(src, qn, log)
     if src.lower().endswith(".gguf"):
         return requantize_gguf(src, qn, log)
     return compress_file(src, qn, log)
