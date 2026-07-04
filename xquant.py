@@ -6,6 +6,7 @@
 
 Q4_0 блок = 32 веса: fp16 d + 16 байт (по 2 ниббла). Деквант: x = d*(q-8).
 """
+import os
 import numpy as np
 import re as _re
 
@@ -342,22 +343,70 @@ def _qs_pack(vals2bit):
             qs[:, g * 32 + b] |= (vals2bit[:, s, w] & 3) << (2 * sft)
     return qs
 
+def _make_qkx2(x, w, nmax, nstep=20, rmin=-1.0, rdelta=0.1):
+    """Взвешенный поиск (scale, add_min) на группу — порт llama.cpp make_qkx2_quants.
+    Минимизирует Σ w·(scale·q + add_min − x)², q∈[0,nmax]. Векторно: x,w=(N,g).
+    Возвращает scale(N,), add_min(N,). Это и есть замена наивного min/max — оно
+    даёт основной прирост качества на 2/3 битах БЕЗ обучения (importance = w)."""
+    g = x.shape[-1]
+    xmin = np.minimum(x.min(-1), 0.0)                 # (N,)
+    xmax = np.maximum(x.max(-1), 0.0)
+    rng = xmax - xmin
+    ok = rng > 1e-12
+    rng_s = np.where(ok, rng, 1.0)
+    iscale = nmax / rng_s
+    L0 = np.clip(np.round(iscale[:, None] * (x - xmin[:, None])), 0, nmax)
+    def _werr(sc, mn, L):
+        pred = sc[:, None] * L + mn[:, None]
+        return np.sum(w * (pred - x) ** 2, axis=-1)
+    best_scale = (1.0 / iscale); best_min = xmin.copy()
+    best_err = _werr(best_scale, best_min, L0)
+    for istep in range(nstep + 1):
+        isc = (rmin + rdelta * istep + nmax) / rng_s
+        l = np.clip(np.round(isc[:, None] * (x - xmin[:, None])), 0, nmax)
+        sw   = np.sum(w, axis=-1)
+        swl  = np.sum(w * l, axis=-1)
+        swl2 = np.sum(w * l * l, axis=-1)
+        swx  = np.sum(w * x, axis=-1)
+        swlx = np.sum(w * l * x, axis=-1)
+        D = sw * swl2 - swl * swl
+        Dok = np.abs(D) > 1e-12
+        Ds = np.where(Dok, D, 1.0)
+        this_scale = (sw * swlx - swx * swl) / Ds
+        this_min   = (swl2 * swx - swl * swlx) / Ds
+        err = _werr(this_scale, this_min, l)
+        upd = Dok & (err < best_err)
+        best_err = np.where(upd, err, best_err)
+        best_scale = np.where(upd, this_scale, best_scale)
+        best_min = np.where(upd, this_min, best_min)
+    best_scale = np.where(ok, best_scale, 0.0)
+    best_min = np.where(ok, best_min, 0.0)
+    return best_scale, best_min
+
 def our_quantize_q2k(x: np.ndarray) -> np.ndarray:
     """Наш энкодер GGML Q2_K (загружаемый 2-бит). Блок 84 байта/256:
-    scales[16] + qs[64] + d(fp16) + dmin(fp16). Асимметричный: w = d*sc*q - dmin*m."""
+    scales[16] + qs[64] + d(fp16) + dmin(fp16). w = d*sc*q - dmin*m.
+    Шкала сабблоков — взвешенным поиском make_qkx2 (importance=x²), не min/max:
+    заметно меньше ошибка на 2 битах при том же формате. XQUANT_NAIVE_Q2=1 → старое."""
     x = np.ascontiguousarray(x, dtype=np.float32).reshape(-1)
     assert x.size % QK_K == 0
     nb = x.size // QK_K
     sb = x.reshape(nb, 16, 16)
-    mn = sb.min(axis=2); mx = sb.max(axis=2)         # [nb,16]
-    dl = (mx - mn) / 3.0                             # шаг (q∈0..3)
-    ml = -mn                                         # смещение (q=0 → mn)
-    dl = np.where(dl <= 0, 1e-8, dl)
-    d = dl.max(axis=1, keepdims=True) / 15.0         # супер-масштаб scale
-    dmin = np.abs(ml).max(axis=1, keepdims=True) / 15.0
-    d = np.where(d == 0, 1e-8, d); dmin = np.where(dmin == 0, 1e-8, dmin)
-    sc4 = np.clip(np.round(dl / d), 0, 15).astype(np.int32)     # [nb,16]
-    m4 = np.clip(np.round(ml / dmin), 0, 15).astype(np.int32)
+    if os.environ.get("XQUANT_NAIVE_Q2", "0").strip() in ("1","on","true","yes"):
+        scale = ((sb.max(2) - np.minimum(sb.min(2), 0.0)) / 3.0)      # наивный фолбэк
+        add_min = np.minimum(sb.min(2), 0.0)
+    else:
+        flat = sb.reshape(nb * 16, 16)
+        wimp = flat * flat + 1e-8                                     # importance = x²
+        sc, am = _make_qkx2(flat, wimp, nmax=3)
+        scale = sc.reshape(nb, 16); add_min = am.reshape(nb, 16)
+    scale = np.where(scale <= 0, 1e-8, scale)
+    the_min = np.maximum(-add_min, 0.0)              # dmin*m = -add_min ≥ 0
+    d = scale.max(axis=1, keepdims=True) / 15.0
+    dmin = the_min.max(axis=1, keepdims=True) / 15.0
+    d = np.where(d <= 0, 1e-8, d); dmin = np.where(dmin <= 0, 1e-8, dmin)
+    sc4 = np.clip(np.round(scale / d), 0, 15).astype(np.int32)       # [nb,16]
+    m4 = np.clip(np.round(the_min / dmin), 0, 15).astype(np.int32)
     dl_eff = (d * sc4); ml_eff = (dmin * m4)
     dl_eff = np.where(dl_eff == 0, 1e-8, dl_eff)
     q = np.clip(np.round((sb + ml_eff[:, :, None]) / dl_eff[:, :, None]), 0, 3).astype(np.uint8)
