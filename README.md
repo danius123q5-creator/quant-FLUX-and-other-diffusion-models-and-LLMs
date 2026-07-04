@@ -57,6 +57,23 @@ Input embeddings, the output projection to the VAE (`final_layer` / `conv_out` /
 `proj_out`), and norms are kept in `bf16` for **every** architecture — so the VAE
 connection is never broken (the classic sub-4-bit "colour noise").
 
+## LoRA-compatible
+Quantizing the base model does **not** break LoRAs. A LoRA is a separate low-rank
+delta applied on top of the weights at compute time:
+
+```
+W' = W_quant  +  (B·A)·scale
+     ↑ Q4/Q2 base   ↑ LoRA stays fp16, added over the dequantized base
+```
+
+The quant only touches the **base** weights; the LoRA matrices stay full-precision
+and their learned correction is added cleanly on the fly (ComfyUI-GGUF dequantizes
+the base per-op and applies the delta). LoRAs are additive corrections, so they're
+robust to the small base shift from quantization — a fp16-trained LoRA runs fine on
+a Q4 (even Q2) base. Tested in production: an identity LoRA on a Q4 FLUX works as
+expected. The **only** thing that breaks a LoRA is *merging* it into the weights and
+then re-quantizing (double loss) — keep them separate: `Q4 gguf + fp16 LoRA`.
+
 ## Results (FLUX.1-dev, real side-by-side generation, same prompt+seed)
 | bits | size | verdict |
 |---|---|---|
