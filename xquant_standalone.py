@@ -171,8 +171,11 @@ def run_gui(prefill=""):
     log.pack(fill="both", expand=True, padx=18, pady=(8,4))
     q = queue.Queue()
     def logline(m): q.put(m)
-    btn = tk.Button(root, text="СЖАТЬ", font=("Segoe UI", 11, "bold"), height=1)
-    btn.pack(pady=(0,12))
+    btnrow = tk.Frame(root); btnrow.pack(pady=(0,12))
+    btn = tk.Button(btnrow, text="СЖАТЬ", font=("Segoe UI", 11, "bold"), height=1, width=14)
+    btn.pack(side="left", padx=4)
+    test_btn = tk.Button(btnrow, text="🧪 Тест качества", font=("Segoe UI", 10), height=1)
+    test_btn.pack(side="left", padx=4)
 
     def worker(src, qn):
         # сжатие в ОТДЕЛЬНОМ процессе, прогресс через файл → GUI не фризит совсем
@@ -222,13 +225,29 @@ def run_gui(prefill=""):
         threading.Thread(target=worker, args=(src, qn), daemon=True).start()
     btn.config(command=start)
 
+    def run_test():
+        src = path_var.get().strip('"')
+        if not os.path.isfile(src): logline("Выбери файл модели!"); return
+        if src.lower().endswith(".gguf"):
+            logline("Тест качества — по .safetensors-исходнику (не по .gguf)."); return
+        log.delete("1.0","end")
+        btn.config(state="disabled"); test_btn.config(state="disabled", text="считаю…")
+        def w():
+            try: quality_test(src, logline)
+            except Exception as e: logline(f"ОШИБКА теста: {e}")
+            finally: q.put(("__test_done__",))
+        threading.Thread(target=w, daemon=True).start()
+    test_btn.config(command=run_test)
+
     last_prog = [False]   # прошлая строка была прогресс-тиком → обновляем на месте
     def poll():
         try:
             while True:
                 m = q.get_nowait()
                 if isinstance(m, tuple):
-                    btn.config(state="normal", text="СЖАТЬ"); last_prog[0] = False
+                    btn.config(state="normal", text="СЖАТЬ")
+                    test_btn.config(state="normal", text="🧪 Тест качества")
+                    last_prog[0] = False
                 else:
                     is_prog = ("тензоров..." in m and "/" in m)   # «обработано N/M тензоров...»
                     if is_prog and last_prog[0]:
@@ -420,6 +439,79 @@ def process(src, qn, log=print):
     if src.lower().endswith(".gguf"):
         return requantize_gguf(src, qn, log)
     return compress_file(src, qn, log)
+
+# байт/вес для оценки размера + порядок вывода
+_BPW = {"Q8_0":34/32, "Q6_K":210/256, "Q5_0":22/32, "Q4_0":18/32, "Q3_K":110/256, "Q2_K":84/256}
+_TEST_ORDER = ["Q8_0","Q6_K","Q5_0","Q4_0","Q3_K","Q2_K"]
+
+def _verdict(psnr):
+    # пороги откалиброваны по ЖИВОМУ A/B на FLUX: Q4_0(~45dB)=чисто, Q3_K(~39dB)=
+    # зерно, Q2_K(~33dB)=муть. Вес-PSNR не линеен к фото — не занижаем планку.
+    if psnr >= 52: return "идеал — не отличить"
+    if psnr >= 44: return "чисто, без потерь на глаз"
+    if psnr >= 40: return "лёгкая мягкость"
+    if psnr >= 35: return "заметное зерно"
+    if psnr >= 30: return "сильное зерно/муть"
+    return "развал"
+
+def quality_test(src, log=print, sample=40, rows_cap=768):
+    """Оффлайн-оценка ПОТЕРЬ квантизации по всем битностям (прокси качества фото).
+    Берём выборку больших 2D-весов, для каждой битности квантуем→разжимаем и
+    считаем отклонение + PSNR. Картинку не генерим (exe без GPU) — но PSNR весов
+    напрямую коррелирует с зерном/мылом на фото."""
+    t0 = time.time()
+    log("=== ТЕСТ КАЧЕСТВА: потери квантизации по битам (прокси качества фото) ===")
+    if src.lower().endswith(".gguf"):
+        log("тест считает по .safetensors-исходнику. Для .gguf дай оригинал."); return
+    # собрать кандидатов из заголовка: большие 2D-веса, кратные 256 (годятся всем типам)
+    with open(src, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]; hdr = json.loads(f.read(n)); base = 8 + n
+    cands = []
+    for k, m in hdr.items():
+        if k == "__metadata__": continue
+        dt = m.get("dtype"); shape = m.get("shape") or []
+        if dt not in ("F32","F16","BF16","F8_E4M3","F8_E5M2"): continue
+        if len(shape) != 2 or int(np.prod(shape)) <= QUANT_THRESHOLD: continue
+        if shape[1] % 256 != 0: continue
+        s, e = m["data_offsets"]
+        cands.append((k, dt, tuple(shape), base+s, base+e, int(np.prod(shape))))
+    if not cands:
+        log("нет подходящих 2D-весов для теста."); return
+    cands.sort(key=lambda c: -c[5])                 # самые большие = самые значимые
+    picks = cands[:sample]
+    log(f"выборка {len(picks)} тензоров (из {len(cands)}), срез до {rows_cap} строк...")
+    mats = []
+    with open(src, "rb") as f:
+        for k, dt, shape, a, b, _ in picks:
+            # читаем ТОЛЬКО нужные строки (rows_cap) — не весь тензор
+            rows, cols = shape
+            r = min(rows, rows_cap)
+            elt = {"F32":4,"F16":2,"BF16":2,"F8_E4M3":1,"F8_E5M2":1}[dt]
+            f.seek(a); raw = f.read(r * cols * elt)
+            d = _decode(raw, dt, (r, cols))
+            mats.append(np.ascontiguousarray(d, np.float32))
+    log("бит     байт/вес   отклонение   PSNR      вердикт")
+    log("-" * 60)
+    for qn in _TEST_ORDER:
+        fn, ggtype, blk = OUR[qn]
+        sq_err = 0.0; sq_sig = 0.0; peak = 0.0
+        for d in mats:
+            try:
+                q = fn(d)
+                deq = xgguf.dec_source(q.tobytes() if hasattr(q,"tobytes") else bytes(q),
+                                       ggtype, d.size).reshape(d.shape)
+            except Exception:
+                continue
+            diff = deq - d
+            sq_err += float(np.sum(diff*diff)); sq_sig += float(np.sum(d*d))
+            peak = max(peak, float(np.max(np.abs(d))))
+        if sq_sig <= 0: continue
+        rel = (sq_err/sq_sig) ** 0.5                 # относит. RMS-ошибка
+        rmse = (sq_err / sum(m.size for m in mats)) ** 0.5
+        psnr = 20*np.log10(peak/rmse) if rmse > 0 else 99.0
+        log(f"{qn:6}  {_BPW[qn]:.2f}       {rel*100:5.1f}%       {psnr:5.1f} dB   {_verdict(psnr)}")
+    log("-" * 60)
+    log(f"меньше отклонение / выше PSNR = чище фото. Готово за {_fmt_dur(time.time()-t0)}")
 
 def main():
     # CLI: <файл> <битность> [progfile] → жмём. Иначе → GUI.

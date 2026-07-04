@@ -60,6 +60,23 @@ python xquant_standalone.py <model.safetensors> [Q4_0|Q3_K|Q2_K]
 ```
 Output: `<model>-<qtype>.gguf` next to the input.
 
+## Quality test (which bit level to pick)
+The GUI has a **🧪 Quality test** button. It samples the model's largest weight
+tensors and, for every bit level, quantizes → dequantizes → reports the
+reconstruction error and PSNR with a plain verdict — all offline (no GPU, no
+generation), in seconds. Verdicts are calibrated against real FLUX A/B renders:
+
+```
+bit    bytes/w   deviation   PSNR      verdict
+Q8_0   1.06       0.6%       69 dB     flawless
+Q4_0   0.56       8.9%       45 dB     clean, no visible loss
+Q3_K   0.43      18.6%       39 dB     visible grain
+Q2_K   0.33      33.3%       33 dB     heavy grain / mush
+```
+Weight PSNR isn't linear with image quality, so the thresholds are tuned so
+"clean" ends where FLUX renders actually start to grain — Q4_0 is the practical
+floor for indistinguishable FLUX.
+
 ## Loading in ComfyUI
 Copy `comfyui-node/ComfyUI-XQuant` into `ComfyUI/custom_nodes/`. It adds
 **`XQuant GGUF Loader`** — pick a `.gguf` and it dequantizes on load and builds
