@@ -1,4 +1,4 @@
-# XQuant — custom diffusion-model quantizer (zero third-party engine)
+# Жматель (XQuant) — custom diffusion-model quantizer (zero third-party engine)
 
 Compress diffusion models (FLUX / SDXL / SD1.5 / SD3 / Qwen-Image / Wan …) to
 **2 / 3 / 4-bit GGUF** with a quantization engine written **entirely from scratch** —
@@ -109,6 +109,21 @@ a touch crisper on the very finest hairs, for +2.4 GB.
 > exact fp16 image. Q2_K here is the standard GGML Q2_K format, just encoded well
 > with critical-layer protection from the bf16 source — no new magic, solid
 > engineering.
+
+## Research — how FLUX dies at 1-bit
+
+A separate hands-on study probing the limits below Q2_K: what happens when you binarize
+FLUX.1-dev to **1 bit** with this engine. Short version — pure 1-bit doesn't work, but it
+dies in three distinct, structured ways (collapse-to-mean **void**, variance-blowup
+**noise**, spatial-routing loss **tile**), and **attention turns out far more fragile than
+MLP** (binarizing 12 % of weights as attention kills the model; 24 % as MLP leaves it
+clean). Judged by rendered images, not weight-space cosine (which misleads).
+
+Full write-up, method and images: **[RESEARCH-1bit-flux.md](RESEARCH-1bit-flux.md)**.
+
+> Honesty guard: this is an **experiment log**, not a compression win — the "alive" runs
+> are effectively ~10–14 bit (fatter than Q2_K). It's a *sensitivity map*, and the
+> deployable floor remains Q2_K.
 
 ## Usage
 **Easiest — the standalone `XQuant.exe`** (20 MB, no Python needed, numpy bundled):
