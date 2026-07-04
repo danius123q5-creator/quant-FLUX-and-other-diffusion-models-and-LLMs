@@ -38,13 +38,22 @@ Input embeddings, the output projection to the VAE (`final_layer` / `conv_out` /
 `proj_out`), and norms are kept in `bf16` for **every** architecture — so the VAE
 connection is never broken (the classic sub-4-bit "colour noise").
 
-## Results (FLUX.1-dev, tested by real generation)
-| bits | size | PSNR vs fp16 | verdict |
-|---|---|---|---|
-| fp16 | 23.8 GB | — | reference |
-| 4-bit Q4_0 | 6.4 GB | ~25 dB | perfect, indistinguishable |
-| 3-bit Q3_K | ~5 GB | ~18 dB | visible grain — not recommended for FLUX |
-| **2-bit Q2_K** | **4.0 GB** | ~19 dB | **size/quality sweet spot** |
+## Results (FLUX.1-dev, real side-by-side generation, same prompt+seed)
+| bits | size | verdict |
+|---|---|---|
+| fp16 | 23.8 GB | reference |
+| **4-bit Q4_0** | **6.4 GB** | ✅ **recommended — stable, quality, indistinguishable from fp16** |
+| 3-bit Q3_K | ~5–6 GB | ❌ visible grain — worse than Q2 despite more bits; not recommended |
+| 2-bit Q2_K | 4.0 GB | clean too (landscapes + close-up faces ≈ Q4), slightly softer fine detail |
+
+**Q4_0 is the go-to: maximum quality with real stability** — it's what the
+production bot runs on. Q2_K is a pleasant surprise (clean at 4.0 GB, great when
+VRAM is tight or a face-swap will overwrite the base face anyway). Q3_K is the odd
+one out — our symmetric 3-bit encode grains more than 2-bit, so skip it.
+
+> ⚠️ **Weight PSNR is not a reliable quality ranking.** By weight-error Q3_K looks
+> "better" than Q2_K, but real renders show the opposite. Trust the image (use the
+> **🖼 Real-test** button), not the number.
 
 **Post-hoc quantization floor ≈ 2-bit.** Below that (ternary 1.6-bit) quality
 collapses without quantization-aware training.
