@@ -121,7 +121,9 @@ dies in three distinct, structured ways (collapse-to-mean **void**, variance-blo
 MLP** (binarizing 12 % of weights as attention kills the model; 24 % as MLP leaves it
 clean). Judged by rendered images, not weight-space cosine (which misleads).
 
-Full write-up, method and images: **[RESEARCH-1bit-flux.md](RESEARCH-1bit-flux.md)**.
+Plus: attention can be **rescued training-free** with an orthogonal "box" (incoherence
+rotation), while **adaLN is the hard wall** the box can't break (a magnitude problem, not
+an outlier one). Full write-up, method and images: **[RESEARCH-1bit-flux.md](RESEARCH-1bit-flux.md)**.
 
 > Honesty guard: this is an **experiment log**, not a compression win — the "alive" runs
 > are effectively ~10–14 bit (fatter than Q2_K). It's a *sensitivity map*, and the

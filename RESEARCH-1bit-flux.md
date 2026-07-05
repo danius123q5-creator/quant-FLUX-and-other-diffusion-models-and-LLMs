@@ -1,5 +1,7 @@
 # How FLUX.1-dev dies under 1-bit binarization — an empirical probe
 
+**🇬🇧 English** · [🇷🇺 Русский](RESEARCH-1bit-flux.ru.md)
+
 > **What this is:** a hands-on experiment log, not a peer-reviewed discovery. Layer
 > sensitivity to quantization is already known in the literature (GPTQ, AWQ, SmoothQuant
 > all show attention/outlier weights are the fragile ones). What's shown here is that
@@ -26,6 +28,11 @@
 - **The fragile attention can be rescued, training-free, with an orthogonal "box"**
   (incoherence rotation, QuIP-style): rotate the weights, binarize in the rotated
   basis, rotate back. Attention that binarized to a dead tile comes back as a **face**.
+- **But adaLN (modulation) is a hard wall the box cannot break.** Binarizing the adaLN
+  layers — even inside the box — collapses the model to a flat green field. Its failure is
+  a *magnitude* problem, not an *outlier* problem, so the rotation (which only tames
+  outliers) can't fix it. This is why full 1-bit stays dead: MLP + attention can go to
+  1-bit, but adaLN must stay high-precision.
 
 ## Method
 
@@ -113,6 +120,33 @@ attention — the box is what brings the fragile organ back to life. It's not pi
 is the whole ballgame for the layer that was killing us. Combined with the MLP-is-robust
 finding, this is the honest path toward genuinely-low-bit-but-alive: **MLP binarized
 directly, attention binarized inside a box.**
+
+## Where it stops: adaLN is the wall (magnitude, not outliers)
+
+With attention rescued and MLP already robust, the obvious next move is to push toward
+*full* 1-bit — binarize everything, including the **adaLN / modulation** layers (~27 % of
+FLUX's weights). It doesn't work. Every configuration that binarizes adaLN — naively, or
+with the box, alone or combined with the single-blocks — renders the **same flat green
+field**. No content, no face.
+
+| run | what is binarized | result | image |
+|---|---|---|---|
+| Q1 (alive) | MLP + attention (box), **adaLN kept fp16** | 🟢 clean face | ![](media/1bit_study/q1_working.png) |
+| adaLN in a box | adaLN + single-blocks (adaLN boxed) | 🟩 dead **green field** | ![](media/1bit_study/adaln_green_death.png) |
+
+Why the box fails here, when it saved attention: attention died from **outliers** — a few
+huge weights hijacking the per-row scale — which a rotation spreads out. adaLN dies from a
+**loss of magnitude precision**. Its outputs are the per-token scale/shift that directly
+multiply the residual stream, so they need accurate *values*, not just a well-shaped
+distribution. Binarizing to `±scale` throws the exact magnitudes away, and the box only
+reshapes the distribution — it cannot bring the magnitudes back. Different failure class,
+not rotation-fixable.
+
+**So the ceiling is concrete:** MLP → 1-bit, attention → 1-bit-in-a-box, but **adaLN must
+stay high-precision.** That caps a post-training FLUX at an effective mixed rate (roughly
+Q2-and-up when packed properly), not a true uniform 1-bit. Getting adaLN to 1-bit would
+require training the model for it (BitNet-style) — outside the scope of a post-hoc
+quantizer.
 
 ## Honest limitations (read before getting excited)
 
