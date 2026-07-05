@@ -375,33 +375,40 @@ def _make_qkx2(x, w, nmax, nstep=20, rmin=-1.0, rdelta=0.1):
     Минимизирует Σ w·(scale·q + add_min − x)², q∈[0,nmax]. Векторно: x,w=(N,g).
     Возвращает scale(N,), add_min(N,). Это и есть замена наивного min/max — оно
     даёт основной прирост качества на 2/3 битах БЕЗ обучения (importance = w)."""
-    g = x.shape[-1]
+    # nstep тюнится env'ом: XQUANT_Q2_NSTEP=8 → ~2.5× быстрее Q2 (чуть хуже качество).
+    # Дефолт 20 — как было. Оптимизация 2026-07-05: константы (sw/swx/swx2) вынесены из
+    # цикла (было 21× пересчёт), ошибка МНК считается аналитически (без лишнего _werr-
+    # прохода) → тот же результат, но ~2× быстрее. Q2 «долго жмёт» → стало вдвое короче.
+    try: nstep = int(os.environ.get("XQUANT_Q2_NSTEP", str(nstep)) or nstep)
+    except Exception: pass
     xmin = np.minimum(x.min(-1), 0.0)                 # (N,)
     xmax = np.maximum(x.max(-1), 0.0)
     rng = xmax - xmin
     ok = rng > 1e-12
     rng_s = np.where(ok, rng, 1.0)
     iscale = nmax / rng_s
-    L0 = np.clip(np.round(iscale[:, None] * (x - xmin[:, None])), 0, nmax)
-    def _werr(sc, mn, L):
-        pred = sc[:, None] * L + mn[:, None]
-        return np.sum(w * (pred - x) ** 2, axis=-1)
-    best_scale = (1.0 / iscale); best_min = xmin.copy()
-    best_err = _werr(best_scale, best_min, L0)
-    for istep in range(nstep + 1):
-        isc = (rmin + rdelta * istep + nmax) / rng_s
-        l = np.clip(np.round(isc[:, None] * (x - xmin[:, None])), 0, nmax)
-        sw   = np.sum(w, axis=-1)
-        swl  = np.sum(w * l, axis=-1)
-        swl2 = np.sum(w * l * l, axis=-1)
-        swx  = np.sum(w * x, axis=-1)
-        swlx = np.sum(w * l * x, axis=-1)
+    wx = w * x                                         # константы, НЕ зависят от l
+    sw = np.sum(w, axis=-1); swx = np.sum(wx, axis=-1); swx2 = np.sum(wx * x, axis=-1)
+    def _terms(L):
+        wl = w * L
+        return np.sum(wl, axis=-1), np.sum(wl * L, axis=-1), np.sum(wl * x, axis=-1)
+    def _fit(swl, swl2, swlx):
         D = sw * swl2 - swl * swl
         Dok = np.abs(D) > 1e-12
         Ds = np.where(Dok, D, 1.0)
-        this_scale = (sw * swlx - swx * swl) / Ds
-        this_min   = (swl2 * swx - swl * swlx) / Ds
-        err = _werr(this_scale, this_min, l)
+        return (sw * swlx - swx * swl) / Ds, (swl2 * swx - swl * swlx) / Ds, Dok
+    L0 = np.clip(np.round(iscale[:, None] * (x - xmin[:, None])), 0, nmax)
+    swl0, swl20, swlx0 = _terms(L0)
+    best_scale = (1.0 / iscale); best_min = xmin.copy()
+    # ошибка наивного старта (1/iscale, xmin) на L0 через квадратичную формулу
+    best_err = (best_scale * best_scale * swl20 + best_min * best_min * sw + swx2
+                + 2 * best_scale * best_min * swl0 - 2 * best_scale * swlx0 - 2 * best_min * swx)
+    for istep in range(nstep + 1):
+        isc = (rmin + rdelta * istep + nmax) / rng_s
+        l = np.clip(np.round(isc[:, None] * (x - xmin[:, None])), 0, nmax)
+        swl, swl2, swlx = _terms(l)
+        this_scale, this_min, Dok = _fit(swl, swl2, swlx)
+        err = swx2 - this_scale * swlx - this_min * swx   # ошибка МНК-решения = _werr
         upd = Dok & (err < best_err)
         best_err = np.where(upd, err, best_err)
         best_scale = np.where(upd, this_scale, best_scale)
