@@ -35,6 +35,41 @@ _BITS = [("8-бит (Q8_0) — почти без потерь","Q8_0"), ("6-би
          ("3-бит (Q3_K) — компактно","Q3_K"), ("2-бит (Q2_K) — минимум","Q2_K"),
          ("1-бит (Q1) — ЭКСПЕРИМЕНТ, демо-качества (не сжатие)","Q1")]
 
+# ── i18n: русский/английский интерфейс (один EXE, тумблер RU/EN) ────────────
+_BITS_EN = [("8-bit (Q8_0) — near-lossless","Q8_0"), ("6-bit (Q6_K) — high","Q6_K"),
+            ("5-bit (Q5_0) — high","Q5_0"), ("4-bit (Q4_0) — sweet spot","Q4_0"),
+            ("3-bit (Q3_K) — compact","Q3_K"), ("2-bit (Q2_K) — minimum","Q2_K"),
+            ("1-bit (Q1) — EXPERIMENTAL, quality demo (not compression)","Q1")]
+_BITS_L = {"ru": _BITS, "en": _BITS_EN}
+_L = {
+ "ru": {"title":"Жматель — ужиматель моделей","model":"Модель (.safetensors):","browse":"Обзор…",
+        "from":"Из ComfyUI/LM Studio:","find":"🔍 Найти","found":"найдено {n} моделей — выбери",
+        "notfound":"не нашёл (жми Обзор)","bits":"Битность:","outdir":"Папка результата:",
+        "open":"📂 Открыть","outhint":"(пусто = рядом с исходником)","compress":"СЖАТЬ",
+        "qtest":"🧪 Тест качества","realtest":"🖼 Реал-тест","pick":"Выбери файл модели!",
+        "compressing":"жму…","counting":"считаю…","generating":"генерю…",
+        "testgguf":"Тест качества — по .safetensors-исходнику (не по .gguf).",
+        "savewhere":"Куда сохранить результат","cmpwin":"Реал-тест — сравнение кадров",
+        "models":"Модели","other":"Язык / Language"},
+ "en": {"title":"Zhmatel — model squeezer","model":"Model (.safetensors):","browse":"Browse…",
+        "from":"From ComfyUI/LM Studio:","find":"🔍 Find","found":"{n} models found — pick one",
+        "notfound":"none found (use Browse)","bits":"Bit level:","outdir":"Output folder:",
+        "open":"📂 Open","outhint":"(empty = next to the source)","compress":"COMPRESS",
+        "qtest":"🧪 Quality test","realtest":"🖼 Real-test","pick":"Pick a model file!",
+        "compressing":"squeezing…","counting":"computing…","generating":"generating…",
+        "testgguf":"Quality test — from the .safetensors source (not .gguf).",
+        "savewhere":"Where to save the result","cmpwin":"Real-test — frame comparison",
+        "models":"Models","other":"Язык / Language"},
+}
+def _detect_lang():
+    v = os.environ.get("XQUANT_LANG","").strip().lower()
+    if v in ("ru","en"): return v
+    try:
+        import ctypes
+        return "ru" if (ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3ff) == 0x19 else "en"
+    except Exception:
+        return "ru"
+
 # ── СМЕШАННЫЙ квант (аналог Q3_K_M): чувствительные слои — на тип выше ──
 # Слои, что кормят ОСТАТОЧНЫЙ поток (выходные проекции attn + down-проекции MLP),
 # при 3/2-бит дают основной шум/«зерно». Держим их на ступень выше — зерно уходит,
@@ -93,35 +128,45 @@ def scan_models(dirs, cap=400):
                     if len(found) >= cap: return found
     return found
 
-def run_gui(prefill=""):
-    """Полноценное окно: выбор файла + битность + прогресс. Сжатие в потоке."""
+def run_gui(prefill="", lang=None):
+    """Окно: выбор файла + битность + прогресс. RU/EN тумблер (дефолт по локали ОС)."""
     import tkinter as tk
     from tkinter import ttk, filedialog
     import threading, queue
-    root = tk.Tk(); root.title("Жматель — ужиматель моделей")
+    if lang not in ("ru", "en"): lang = _detect_lang()
+    def _t(k): return _L[lang].get(k, _L["en"].get(k, k))
+    bits = _BITS_L[lang]
+    root = tk.Tk(); root.title(_t("title"))
     root.geometry("565x625"); root.minsize(565, 625)   # всегда открывать в этом размере
     try: root.eval('tk::PlaceWindow . center')
     except Exception: pass
+
+    # тумблер языка — пересоздаёт окно на другом языке
+    def _switch():
+        cur = path_var.get()
+        root.destroy(); run_gui(cur, "en" if lang == "ru" else "ru")
+    tk.Button(root, text=("EN" if lang == "ru" else "RU"), font=("Segoe UI", 8),
+              width=3, command=_switch).place(relx=1.0, x=-8, y=8, anchor="ne")
 
     tk.Label(root, text="Жматель", font=("Segoe UI", 18, "bold")).pack(pady=(14,0))
     tk.Label(root, text="diffusion model quantizer  •  own engine  •  AGPL-3.0",
              font=("Segoe UI", 9), fg="#888").pack()
 
     frm = tk.Frame(root); frm.pack(fill="x", padx=18, pady=(14,4))
-    tk.Label(frm, text="Модель (.safetensors):", font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
+    tk.Label(frm, text=_t("model"), font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
     path_var = tk.StringVar(value=prefill)
     ent = tk.Entry(frm, textvariable=path_var, width=48); ent.grid(row=1, column=0, sticky="we", pady=2)
     def browse():
-        p = filedialog.askopenfilename(filetypes=[("Модели","*.safetensors *.gguf"),
+        p = filedialog.askopenfilename(filetypes=[(_t("models"),"*.safetensors *.gguf"),
                                                   ("Safetensors","*.safetensors"),
                                                   ("GGUF (LLM)","*.gguf"),("All","*.*")])
         if p: path_var.set(p)
-    tk.Button(frm, text="Обзор…", command=browse).grid(row=1, column=1, padx=(6,0))
+    tk.Button(frm, text=_t("browse"), command=browse).grid(row=1, column=1, padx=(6,0))
     frm.columnconfigure(0, weight=1)
 
     # авто-поиск моделей ComfyUI/LM Studio
     mf = tk.Frame(root); mf.pack(fill="x", padx=18, pady=(2,0))
-    tk.Label(mf, text="Из ComfyUI/LM Studio:", font=("Segoe UI", 9), fg="#888").grid(row=0, column=0, sticky="w")
+    tk.Label(mf, text=_t("from"), font=("Segoe UI", 9), fg="#888").grid(row=0, column=0, sticky="w")
     found_map = {}
     fnd_var = tk.StringVar(value="")
     fnd_cb = ttk.Combobox(mf, textvariable=fnd_var, values=[], state="readonly", width=44)
@@ -138,34 +183,34 @@ def run_gui(prefill=""):
             found_map.clear()
             for label, p in items: found_map[label] = p
             fnd_cb["values"] = list(found_map.keys())
-            fnd_cb.set(f"найдено {len(items)} моделей — выбери" if items else "не нашёл (жми Обзор)")
+            fnd_cb.set(_t("found").format(n=len(items)) if items else _t("notfound"))
         threading.Thread(target=w, daemon=True).start()
-    tk.Button(mf, text="🔍 Найти", command=do_scan).grid(row=1, column=1, padx=(6,0))
+    tk.Button(mf, text=_t("find"), command=do_scan).grid(row=1, column=1, padx=(6,0))
     mf.columnconfigure(0, weight=1)
     do_scan()   # скан при открытии
 
     bf = tk.Frame(root); bf.pack(fill="x", padx=18, pady=6)
-    tk.Label(bf, text="Битность:", font=("Segoe UI", 10)).pack(side="left")
-    bit_var = tk.StringVar(value=_BITS[3][0])
-    ttk.Combobox(bf, textvariable=bit_var, values=[b[0] for b in _BITS],
+    tk.Label(bf, text=_t("bits"), font=("Segoe UI", 10)).pack(side="left")
+    bit_var = tk.StringVar(value=bits[3][0])
+    ttk.Combobox(bf, textvariable=bit_var, values=[b[0] for b in bits],
                  state="readonly", width=32).pack(side="left", padx=8)
 
     # папка результата (пусто = рядом с исходником)
     of = tk.Frame(root); of.pack(fill="x", padx=18, pady=(0,2))
-    tk.Label(of, text="Папка результата:", font=("Segoe UI", 9), fg="#888").grid(row=0, column=0, sticky="w")
+    tk.Label(of, text=_t("outdir"), font=("Segoe UI", 9), fg="#888").grid(row=0, column=0, sticky="w")
     out_var = tk.StringVar(value="")
     tk.Entry(of, textvariable=out_var).grid(row=1, column=0, sticky="we", pady=2)
     def browse_out():
-        d = filedialog.askdirectory(title="Куда сохранить результат")
+        d = filedialog.askdirectory(title=_t("savewhere"))
         if d: out_var.set(d)
-    tk.Button(of, text="Обзор…", command=browse_out).grid(row=1, column=1, padx=(6,0))
+    tk.Button(of, text=_t("browse"), command=browse_out).grid(row=1, column=1, padx=(6,0))
     def open_out():
         d = out_var.get().strip() or (os.path.dirname(path_var.get().strip('"')) if path_var.get() else "")
         if d and os.path.isdir(d):
             try: os.startfile(d)
-            except Exception as e: logline(f"открыть не удалось: {e}")
-    tk.Button(of, text="📂 Открыть", command=open_out).grid(row=1, column=2, padx=(6,0))
-    tk.Label(of, text="(пусто = рядом с исходником)", font=("Segoe UI", 8), fg="#666").grid(row=2, column=0, sticky="w")
+            except Exception as e: logline(f"open failed: {e}")
+    tk.Button(of, text=_t("open"), command=open_out).grid(row=1, column=2, padx=(6,0))
+    tk.Label(of, text=_t("outhint"), font=("Segoe UI", 8), fg="#666").grid(row=2, column=0, sticky="w")
     of.columnconfigure(0, weight=1)
 
     log = tk.Text(root, height=9, width=64, font=("Consolas", 9), bg="#111", fg="#ddd")
@@ -173,11 +218,11 @@ def run_gui(prefill=""):
     q = queue.Queue()
     def logline(m): q.put(m)
     btnrow = tk.Frame(root); btnrow.pack(pady=(0,12))
-    btn = tk.Button(btnrow, text="СЖАТЬ", font=("Segoe UI", 11, "bold"), height=1, width=14)
+    btn = tk.Button(btnrow, text=_t("compress"), font=("Segoe UI", 11, "bold"), height=1, width=14)
     btn.pack(side="left", padx=4)
-    test_btn = tk.Button(btnrow, text="🧪 Тест качества", font=("Segoe UI", 10), height=1)
+    test_btn = tk.Button(btnrow, text=_t("qtest"), font=("Segoe UI", 10), height=1)
     test_btn.pack(side="left", padx=4)
-    real_btn = tk.Button(btnrow, text="🖼 Реал-тест", font=("Segoe UI", 10), height=1)
+    real_btn = tk.Button(btnrow, text=_t("realtest"), font=("Segoe UI", 10), height=1)
     real_btn.pack(side="left", padx=4)
     _imgrefs = []   # держим ссылки на PhotoImage, иначе GC съест картинки
 
@@ -220,22 +265,22 @@ def run_gui(prefill=""):
         q.put(("__done__",))
     def start():
         src = path_var.get().strip('"')
-        if not os.path.isfile(src): logline("Выбери файл модели!"); return
-        qn = dict(_BITS)[bit_var.get()]
+        if not os.path.isfile(src): logline(_t("pick")); return
+        qn = dict(bits)[bit_var.get()]
         od = out_var.get().strip()
         if od and os.path.isdir(od): os.environ["XQUANT_OUT_DIR"] = od       # наследуется subprocess'ом
         else: os.environ.pop("XQUANT_OUT_DIR", None)
-        log.delete("1.0","end"); btn.config(state="disabled", text="жму…")
+        log.delete("1.0","end"); btn.config(state="disabled", text=_t("compressing"))
         threading.Thread(target=worker, args=(src, qn), daemon=True).start()
     btn.config(command=start)
 
     def run_test():
         src = path_var.get().strip('"')
-        if not os.path.isfile(src): logline("Выбери файл модели!"); return
+        if not os.path.isfile(src): logline(_t("pick")); return
         if src.lower().endswith(".gguf"):
-            logline("Тест качества — по .safetensors-исходнику (не по .gguf)."); return
+            logline(_t("testgguf")); return
         log.delete("1.0","end")
-        btn.config(state="disabled"); test_btn.config(state="disabled", text="считаю…")
+        btn.config(state="disabled"); test_btn.config(state="disabled", text=_t("counting"))
         def w():
             try: quality_test(src, logline)
             except Exception as e: logline(f"ОШИБКА теста: {e}")
@@ -247,7 +292,7 @@ def run_gui(prefill=""):
         # показать сгенерированные кадры рядом в отдельном окне (главный поток)
         if not results:
             return
-        win = tk.Toplevel(root); win.title("Реал-тест — сравнение кадров")
+        win = tk.Toplevel(root); win.title(_t("cmpwin"))
         win.configure(bg="#111")
         row = tk.Frame(win, bg="#111"); row.pack(padx=10, pady=10)
         for label, path in results:
@@ -265,10 +310,10 @@ def run_gui(prefill=""):
 
     def run_realtest():
         src = path_var.get().strip('"')
-        if not os.path.isfile(src): logline("Выбери файл модели!"); return
+        if not os.path.isfile(src): logline(_t("pick")); return
         log.delete("1.0","end")
         btn.config(state="disabled"); test_btn.config(state="disabled")
-        real_btn.config(state="disabled", text="генерю…")
+        real_btn.config(state="disabled", text=_t("generating"))
         def w():
             res = []
             try: res = real_gen_test(src, logline)
@@ -283,9 +328,9 @@ def run_gui(prefill=""):
             while True:
                 m = q.get_nowait()
                 if isinstance(m, tuple):
-                    btn.config(state="normal", text="СЖАТЬ")
-                    test_btn.config(state="normal", text="🧪 Тест качества")
-                    real_btn.config(state="normal", text="🖼 Реал-тест")
+                    btn.config(state="normal", text=_t("compress"))
+                    test_btn.config(state="normal", text=_t("qtest"))
+                    real_btn.config(state="normal", text=_t("realtest"))
                     last_prog[0] = False
                     if m and m[0] == "__images__":
                         try: show_images(m[1])
