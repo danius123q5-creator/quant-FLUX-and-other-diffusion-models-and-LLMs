@@ -59,6 +59,29 @@ Input embeddings, the output projection to the VAE (`final_layer` / `conv_out` /
 `proj_out`), and norms are kept in `bf16` for **every** architecture — so the VAE
 connection is never broken (the classic sub-4-bit "colour noise").
 
+## Smart bit allocation — SMART (on by default)
+Not every layer deserves the same bits. Before writing, XQuant runs a cheap
+**Q4 probe** over each 2-D weight and measures the *absolute* reconstruction
+error `‖W − dequant(quant(W))‖` — how much a layer actually resists quantization.
+Then it **reallocates bits, size-neutrally**:
+
+- **hard / high-impact layers → one step up** (e.g. `Q4_0 → Q5_0`) — protected;
+- **easy / low-impact ("dumb") layers → one step down** (e.g. `Q4_0 → Q3_K`) — squeezed;
+- the bytes spent upgrading are paid for by the bytes freed downgrading → **same file size, less total distortion.**
+
+This is data-free (no calibration needed) — importance is read straight from the
+weights, in the spirit of AWQ's "keep the salient weights, quantize the rest
+harder." On real FLUX.1-dev at `Q4_0` base it upgrades ~40 critical layers and
+downgrades ~90 low-impact ones at **net-zero size**; on a synthetic mix it cuts
+total weight distortion **~19 % at equal size**. Works for every base
+`Q2_K…Q6_K`. Disable with `XQUANT_SMART=0`; tune spread with
+`XQUANT_SMART_UP` / `XQUANT_SMART_DN` (default `0.30`).
+
+> Coming next: **imatrix** (activation-aware importance) — feed a few denoise
+> steps' activation statistics into the per-group solver *and* the SMART probe,
+> turning weight-importance into full activation-importance (AWQ-grade) for a
+> step-change on 2/3-bit.
+
 ## LoRA-compatible
 Quantizing the base model does **not** break LoRAs. A LoRA is a separate low-rank
 delta applied on top of the weights at compute time:

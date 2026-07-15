@@ -8,3 +8,4 @@ build_venv/
 build_tmp/
 dist/
 *.spec
+XQuant.exe

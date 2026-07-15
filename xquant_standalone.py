@@ -92,6 +92,62 @@ def _eff_quant(key, qn):
         return up
     return qn
 
+def _env_on(name, default="0"):
+    return os.environ.get(name, default).strip().lower() in ("1","on","yes","true")
+
+# ══════════ УМНЫЙ КВАНТ (XQUANT_SMART): важность по ДАННЫМ, не по имени ══════════
+# Идея (данича): не все веса равны. Дешёвый Q4-зонд меряет, НАСКОЛЬКО слой
+# сопротивляется квантованию (relerr). Большой relerr = «рабочий/важный» слой
+# (выбросы, тяжёлые хвосты) → бережём (ступень ВВЕРХ). Малый = «тупой» →
+# жмём сильнее (ступень ВНИЗ). Перераспределяем РАЗМЕР-НЕЙТРАЛЬНО: сколько байт
+# добавили на важных — столько (или больше) отняли на тупых. Итог: тот же/меньше
+# размер, меньше артефактов. Data-free (без калибровки) — как AWQ по весам.
+_LADDER = ["Q2_K", "Q3_K", "Q4_0", "Q5_0", "Q6_K"]     # загружаемые GGML-типы по возрастанию
+_BPW    = {"Q2_K":2.625, "Q3_K":3.4375, "Q4_0":4.5, "Q5_0":5.5, "Q6_K":6.5625, "Q8_0":8.5}  # бит/вес
+_BLK    = {"Q2_K":256, "Q3_K":256, "Q4_0":32, "Q5_0":32, "Q6_K":256, "Q8_0":32}
+
+def _step(qn, d):
+    """Сосед по лестнице типов (+1 = точнее/больше, −1 = грубее/меньше). None на краю."""
+    if qn not in _LADDER: return None
+    i = _LADDER.index(qn) + d
+    return _LADDER[i] if 0 <= i < len(_LADDER) else None
+
+def _smart_alloc(items, qn, log=print):
+    """items: список (key, cols, params, sens). Возвращает {key: eff_qn} только для
+    тех слоёв, что уходят ВВЕРХ/ВНИЗ; остальные пусть остаются на базовом qn.
+    Размер-нейтрально/меньше: бюджет апгрейдов ≤ освобождённые даунгрейдом байты."""
+    up_t, dn_t = _step(qn, +1), _step(qn, -1)
+    valid = [it for it in items if it[3] >= 0]
+    if len(valid) < 6 or (up_t is None and dn_t is None):
+        return {}
+    up_frac = float(os.environ.get("XQUANT_SMART_UP", "0.30") or 0.30)
+    dn_frac = float(os.environ.get("XQUANT_SMART_DN", "0.30") or 0.30)
+    by_sens = sorted(valid, key=lambda t: t[3])            # по возрастанию «важности»
+    n = len(by_sens)
+    alloc = {}
+    freed = 0.0
+    # ── ТУПЫЕ (низ) → ступень ВНИЗ, копим освобождённые байты ──
+    if dn_t is not None:
+        for key, cols, params, _ in by_sens[:max(1, int(n*dn_frac))]:
+            if cols % _BLK[dn_t]:  continue               # цель не делит строку — пропуск
+            freed += params * (_BPW[qn] - _BPW[dn_t]) / 8.0
+            alloc[key] = dn_t
+    # ── ВАЖНЫЕ (верх) → ступень ВВЕРХ, тратим не больше освобождённого ──
+    if up_t is not None:
+        spent = 0.0; up_cap = int(n * up_frac)
+        for key, cols, params, _ in reversed(by_sens):    # самые важные первыми
+            if len(alloc) - sum(1 for v in alloc.values() if v==dn_t) >= up_cap: break
+            if key in alloc or cols % _BLK[up_t]: continue
+            cost = params * (_BPW[up_t] - _BPW[qn]) / 8.0
+            if spent + cost > freed and freed > 0: break  # держим размер-нейтральность
+            spent += cost; alloc[key] = up_t
+    nu = sum(1 for v in alloc.values() if v == up_t)
+    nd = sum(1 for v in alloc.values() if v == dn_t)
+    delta = (sum(params*(_BPW[alloc[k]]-_BPW[qn])/8.0
+                 for k,_,params,_ in valid if k in alloc)) / 1e6
+    log(f"   SMART: ↑{nu} важных→{up_t}, ↓{nd} тупых→{dn_t}  (Δразмер {delta:+.0f} МБ, база {qn})")
+    return alloc
+
 def find_model_dirs():
     """Авто-детект папок моделей ComfyUI + LM Studio (существующие)."""
     home = os.path.expanduser("~")
@@ -426,9 +482,34 @@ def compress_file(src, qn, log=print):
     keys = [k for k,_,_,_ in _iter_hdr(src)]
     pfx = strip_prefix(keys)
     arch = detect_arch([k[len(pfx):] if pfx else k for k in keys])
-    mixed = qn in _UPGRADE and os.environ.get("XQUANT_MIXED","1").strip().lower() not in ("0","off","no","false")
-    log(f"{os.path.basename(src)}  arch={arch}  ->  {qn}{' (mixed: чувств.→'+_UPGRADE[qn]+')' if mixed else ''}")
     base_fn = OUR.get(qn, (None,None,32))[0]
+    # SMART включён по УМОЛЧАНИЮ для всех битностей Q2_K…Q6_K (удаление тупых весов,
+    # защита важных, размер-нейтрально). Откат на старое поведение: XQUANT_SMART=0.
+    smart = _env_on("XQUANT_SMART", "1") and qn in _LADDER and base_fn is not None
+    mixed = (not smart) and qn in _UPGRADE and os.environ.get("XQUANT_MIXED","1").strip().lower() not in ("0","off","no","false")
+    tag = " (SMART: важность по данным)" if smart else (' (mixed: чувств.→'+_UPGRADE[qn]+')' if mixed else '')
+    log(f"{os.path.basename(src)}  arch={arch}  ->  {qn}{tag}")
+    # ── SMART-скан: дешёвый Q4-зонд меряет важность каждого слоя → распределение бит ──
+    smart_alloc = {}
+    if smart:
+        log("   SMART: зондирую важность слоёв (Q4-roundtrip relerr)...")
+        items = []
+        for k, dt, shape, raw in load_tensors(src):
+            if pfx and not k.startswith(pfx): continue
+            key = k[len(pfx):] if pfx and k.startswith(pfx) else k
+            if dt not in ("F32","F16","BF16","F8_E4M3","F8_E5M2"): continue
+            nd = len(shape); npm = int(np.prod(shape)) if shape else 1
+            if not (nd == 2 and npm > QUANT_THRESHOLD and not CRITICAL(key) and shape[1] % 32 == 0):
+                continue
+            data = _decode(raw, dt, shape)
+            # sens = АБСОЛЮТНАЯ ошибка Q4-зонда ‖W−Wq‖. Именно она бьёт по выходу W·x
+            # (относительная обманывает: у мелкого слоя relerr большой, а урона мало).
+            try:
+                d = data.astype(np.float32).reshape(-1)
+                sens = float(np.linalg.norm(d - _q4_roundtrip(data, shape).reshape(-1)))
+            except Exception: sens = -1.0
+            items.append((key, int(shape[1]), npm, sens))
+        smart_alloc = _smart_alloc(items, qn, log)
     n_total = len(keys)
     nq = nf = nup = 0; out = []; total = 0
     for k, dt, shape, raw in load_tensors(src):
@@ -437,13 +518,16 @@ def compress_file(src, qn, log=print):
         if dt not in ("F32","F16","BF16","F8_E4M3","F8_E5M2"): continue
         data = _decode(raw, dt, shape)
         nd = len(shape); npm = int(np.prod(shape)) if shape else 1
-        eff = _eff_quant(key, qn) if base_fn else qn        # чувствит. слой → ступень выше
+        if smart:   eff = smart_alloc.get(key, qn)          # важность по данным
+        else:       eff = _eff_quant(key, qn) if base_fn else qn   # чувствит. слой → ступень выше
         fn, ggtype, blk = OUR.get(eff, (None,None,32))
         if (fn and nd==2 and npm>QUANT_THRESHOLD and not CRITICAL(key) and shape[1] % blk == 0):
             try:
                 out.append((key, ggtype, tuple(shape), fn(data).tobytes())); nq += 1
                 if eff != qn: nup += 1
-            except Exception: out.append((key, xgguf.T.F16, tuple(shape), xgguf.enc_f16(data))); nf += 1
+            except Exception as e:      # НЕ молчим: молчаливый F16 = «внезапно» раздутый файл
+                out.append((key, xgguf.T.F16, tuple(shape), xgguf.enc_f16(data))); nf += 1
+                log(f"  ⚠ фолбэк→F16: {key} {tuple(shape)} [{eff}] — {type(e).__name__}: {e}")
         elif nd == 1 or npm <= QUANT_THRESHOLD:
             out.append((key, xgguf.T.F32, tuple(shape), xgguf.enc_f32(data)))
         else:
@@ -451,8 +535,10 @@ def compress_file(src, qn, log=print):
         total += 1
         if total % 10 == 0: log(f"  обработано {total}/{n_total} тензоров...")
     dst = _out_path(src, qn)
-    log(f"пишу GGUF ({len(out)} тензоров{', '+str(nup)+' чувств.→'+_UPGRADE[qn] if nup else ''})...")
+    _upnote = (f", {nup} слоёв переразмечено" if smart else f", {nup} чувств.→{_UPGRADE[qn]}") if nup else ""
+    log(f"пишу GGUF ({len(out)} тензоров{_upnote})...")
     xgguf.write_gguf(dst, arch, out)
+    if nf: log(f"⚠ ВНИМАНИЕ: {nf} тензоров ушли в F16-фолбэк (см. строки ⚠ выше) — файл больше ожидаемого")
     log(f"ГОТОВО: {os.path.basename(dst)}  {os.path.getsize(src)/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  за {_fmt_dur(time.time()-t0)}")
     return dst
 
