@@ -339,9 +339,11 @@ def our_quantize_q3k(x: np.ndarray) -> np.ndarray:
     # квант + 5-битная переквантизация dl → взвешивание только добавляло шум,
     # замер: 18.75% naive vs 19.90% weighted). Оставляем наивный. Взвешенный —
     # только опытный, за XQUANT_WEIGHTED_Q3=1.
-    if os.environ.get("XQUANT_WEIGHTED_Q3", "0").strip() in ("1","on","true","yes"):
+    # С imatrix (важность по активациям) взвешенный поиск СИЛЬНО помогает Q3 (снимает
+    # «зерно») — включаем его автоматически. Без imatrix наивный absmax лучше (см. выше).
+    if _IMAT["col"] is not None or os.environ.get("XQUANT_WEIGHTED_Q3", "0").strip() in ("1","on","true","yes"):
         flat = sb.reshape(nb * 16, 16)
-        dl = _make_qx_sym(flat, flat * flat + 1e-8, nmin=-4, nmax=3).reshape(nb, 16)
+        dl = _make_qx_sym(flat, _imat_weights(flat * flat + 1e-8), nmin=-4, nmax=3).reshape(nb, 16)
     else:
         dl = np.abs(sb).max(axis=2) / 4.0            # дефолт: наивный (лучше)
     d = dl.max(axis=1, keepdims=True) / 31.0         # [nb,1] супер-масштаб
@@ -454,7 +456,7 @@ def our_quantize_q2k(x: np.ndarray) -> np.ndarray:
         add_min = np.minimum(sb.min(2), 0.0)
     else:
         flat = sb.reshape(nb * 16, 16)
-        wimp = flat * flat + 1e-8                                     # importance = x²
+        wimp = _imat_weights(flat * flat + 1e-8)                      # importance: imatrix(акт²) или x²
         sc, am = _make_qkx2(flat, wimp, nmax=3)
         scale = sc.reshape(nb, 16); add_min = am.reshape(nb, 16)
     scale = np.where(scale <= 0, 1e-8, scale)

@@ -226,3 +226,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "XQuantGGUFLoader": "XQuant GGUF Loader (2-8bit · image/video/audio)",
     "XQuantMusicLoader": "XQuant Music Loader (Stable Audio / ACE-Step)",
 }
+
+# imatrix-сборщик (активационная важность) — отдельный модуль
+try:
+    from .imatrix import (NODE_CLASS_MAPPINGS as _IM_CLS,
+                          NODE_DISPLAY_NAME_MAPPINGS as _IM_DN)
+    NODE_CLASS_MAPPINGS.update(_IM_CLS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_IM_DN)
+except Exception as _e:
+    print(f"[XQuant] imatrix-ноды не загрузились: {_e}")

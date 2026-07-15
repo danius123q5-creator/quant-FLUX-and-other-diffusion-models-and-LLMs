@@ -233,7 +233,7 @@ def run_gui(prefill="", lang=None):
     def _t(k): return _L[lang].get(k, _L["en"].get(k, k))
     bits = _BITS_L[lang]
     root = tk.Tk(); root.title(_t("title"))
-    root.geometry("565x665"); root.minsize(565, 665)   # всегда открывать в этом размере
+    root.geometry("565x715"); root.minsize(565, 715)   # всегда открывать в этом размере
     try: root.eval('tk::PlaceWindow . center')
     except Exception: pass
 
@@ -300,6 +300,24 @@ def run_gui(prefill="", lang=None):
     mode_var = tk.StringVar(value=_modes[0][0])          # balance по умолчанию
     ttk.Combobox(mdf, textvariable=mode_var, values=[l for l, _ in _modes],
                  state="readonly", width=40).pack(side="left", padx=8)
+
+    # imatrix (активационная важность, опц.) — композится с ЛЮБЫМ режимом. Указан →
+    # квант activation-aware (Q2/Q3 держат качество при сильном сжатии). Собирается
+    # ComfyUI-нодой imatrix_collect во время генерации.
+    imf = tk.Frame(root); imf.pack(fill="x", padx=18, pady=(0,4))
+    tk.Label(imf, text=("🎯 imatrix:" if lang == "ru" else "🎯 imatrix:"),
+             font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
+    imat_var = tk.StringVar(value="")
+    tk.Entry(imf, textvariable=imat_var).grid(row=0, column=1, sticky="we", padx=6)
+    def browse_imat():
+        p = filedialog.askopenfilename(title=("imatrix (.npy)" if lang == "ru" else "imatrix (.npy)"),
+                                       filetypes=[("imatrix", "*.npy"), ("All", "*.*")])
+        if p: imat_var.set(p)
+    tk.Button(imf, text=_t("browse"), command=browse_imat).grid(row=0, column=2, padx=(0,0))
+    tk.Label(imf, text=("важность по активациям — сильнее жмёт, держит качество (опц.)"
+                        if lang == "ru" else "activation importance — harder compression, keeps quality (opt.)"),
+             font=("Segoe UI", 8), fg="#666").grid(row=1, column=1, sticky="w")
+    imf.columnconfigure(1, weight=1)
 
     # папка результата (пусто = рядом с исходником)
     of = tk.Frame(root); of.pack(fill="x", padx=18, pady=(0,2))
@@ -374,6 +392,9 @@ def run_gui(prefill="", lang=None):
         if not os.path.isfile(src): logline(_t("pick")); return
         qn = dict(bits)[bit_var.get()]
         os.environ["XQUANT_SMART_MODE"] = mode_map.get(mode_var.get(), "balance")  # выбранный режим
+        _im = imat_var.get().strip().strip('"')                       # imatrix-файл (опц.)
+        if _im and os.path.isfile(_im): os.environ["XQUANT_IMATRIX"] = _im
+        else: os.environ.pop("XQUANT_IMATRIX", None)
         od = out_var.get().strip()
         if od and os.path.isdir(od): os.environ["XQUANT_OUT_DIR"] = od       # наследуется subprocess'ом
         else: os.environ.pop("XQUANT_OUT_DIR", None)
@@ -520,6 +541,26 @@ def load_tensors(path):
 
 CRITICAL = xq.is_critical  # универсальная защита слоёв
 
+def _load_imatrix(pfx, log=print):
+    """Загрузить imatrix (активационная важность по столбцам-входам линейных слоёв),
+    путь в XQUANT_IMATRIX. Формат: np.save(dict{key: 1-D float}). Ключи нормализуем
+    (срезаем префикс модели). Нет файла — {} (data-free откат). 2026-07-16."""
+    p = os.environ.get("XQUANT_IMATRIX", "").strip().strip('"')
+    if not p or not os.path.isfile(p):
+        return {}
+    try:
+        raw = np.load(p, allow_pickle=True)
+        d = raw.item() if getattr(raw, "dtype", None) == object else dict(raw)
+    except Exception as e:
+        log(f"  ⚠ imatrix не загрузился ({e}) — иду без него")
+        return {}
+    out = {}
+    for k, v in d.items():
+        kk = k[len(pfx):] if pfx and k.startswith(pfx) else k
+        out[kk] = np.asarray(v, np.float32).reshape(-1)
+    log(f"  imatrix: {len(out)} слоёв активационной важности")
+    return out
+
 def _out_path(src, qn):
     """Путь результата: env XQUANT_OUT_DIR если задан, иначе рядом с исходником."""
     base = os.path.splitext(os.path.basename(src))[0] + f"-{qn}.gguf"
@@ -540,8 +581,9 @@ def compress_file(src, qn, log=print):
     mode = os.environ.get("XQUANT_SMART_MODE", "balance").strip().lower()
     smart = _env_on("XQUANT_SMART", "1") and mode != "flat" and qn in _LADDER and base_fn is not None
     mixed = (not smart) and qn in _UPGRADE and os.environ.get("XQUANT_MIXED","1").strip().lower() not in ("0","off","no","false")
+    imat = _load_imatrix(pfx, log)                # активационная важность (опц.)
     tag = f" (SMART[{mode}])" if smart else (' (mixed: чувств.→'+_UPGRADE[qn]+')' if mixed else '')
-    log(f"{os.path.basename(src)}  arch={arch}  ->  {qn}{tag}")
+    log(f"{os.path.basename(src)}  arch={arch}  ->  {qn}{tag}{'  +imatrix' if imat else ''}")
     # ── SMART-скан: дешёвый Q4-зонд меряет важность каждого слоя → распределение бит ──
     smart_alloc = {}
     if smart:
@@ -574,6 +616,9 @@ def compress_file(src, qn, log=print):
         if smart:   eff = smart_alloc.get(key, qn)          # важность по данным
         else:       eff = _eff_quant(key, qn) if base_fn else qn   # чувствит. слой → ступень выше
         fn, ggtype, blk = OUR.get(eff, (None,None,32))
+        # imatrix: важность активаций для этого тензора (по столбцам=входам). Ставим
+        # ПЕРЕД квантом; ядро (Q2_K/Q3_K) подхватит через xq._imat_weights. Нет — сброс.
+        xq.set_imatrix(imat.get(key) if imat else None, shape[1] if nd == 2 else 0)
         if (fn and nd==2 and npm>QUANT_THRESHOLD and not CRITICAL(key) and shape[1] % blk == 0):
             try:
                 out.append((key, ggtype, tuple(shape), fn(data).tobytes())); nq += 1

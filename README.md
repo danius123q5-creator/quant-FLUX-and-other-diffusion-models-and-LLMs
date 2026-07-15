@@ -86,10 +86,22 @@ total weight distortion **~19 % at equal size**. Works for every base
 | **💎 Quality** | upgrade more salient layers, few downgrades | a bit bigger, max fidelity |
 | **▦ Flat** | uniform quant, no reallocation | legacy behaviour |
 
-> Coming next: **imatrix** (activation-aware importance) — feed a few denoise
-> steps' activation statistics into the per-group solver *and* the SMART probe,
-> turning weight-importance into full activation-importance (AWQ-grade) for a
-> step-change on 2/3-bit.
+## imatrix — activation-aware importance (AWQ-grade)
+SMART reads importance from the *weights*. **imatrix** reads it from the
+*activations* — the real signal flowing through each layer — which is what makes
+low-bit actually hold up. Feed an imatrix and the per-group solver (`Q2_K`/`Q3_K`)
+weights each input channel by `sum(act²)` instead of `x²`:
+
+- On synthetic Q2_K, activation-weighted error drops **~55 %** with imatrix.
+- **Q2 becomes usable** (~4 GB from a 6.8 GB Q4) while keeping the picture;
+  **Q3 stops graining.** This is the "much smaller *and* keeps quality" lever.
+
+**Collecting one** (needs the model on GPU — done inside ComfyUI, no second torch):
+add the **XQuant imatrix: Capture** node before your `KSampler` and **Save** after
+it, run 1–3 generations on varied prompts → get `<model>.imatrix.npy`. Point
+`XQuant.exe` at it (🎯 imatrix field) or set `XQUANT_IMATRIX=<path>`. It composes
+with **any** mode — pair it with 🤏 Shrink / 🔥 Extreme for the smallest file that
+still looks right. Data-free fallback (weight `x²`) when no imatrix is given.
 
 ## LoRA-compatible
 Quantizing the base model does **not** break LoRAs. A LoRA is a separate low-rank
