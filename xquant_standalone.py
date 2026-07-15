@@ -123,19 +123,23 @@ _SMART_MODES = {
                 "ru":"Баланс — тот же размер, лучше картинка"},
     "shrink":  {"up":0.10, "dn":0.55, "two":0.5, "budget":0.25,
                 "ru":"Ширинка — меньше файл, важные целы"},
+    "extreme": {"up":0.04, "dn":0.85, "two":0.85, "budget":0.08,
+                "ru":"Экстрим-ширинка — максимум сжатия"},
     "quality": {"up":0.45, "dn":0.15, "two":0.0, "budget":4.0,
                 "ru":"Качество — чуть больше, максимум"},
 }
-_SMART_MODE_ORDER = ["balance", "shrink", "quality"]
+_SMART_MODE_ORDER = ["balance", "shrink", "extreme", "quality"]
 
 # Подписи режимов для дроп-дауна GUI (+ «Плоский» = flat, отключает SMART)
 _MODE_LABELS = {
     "ru": [("⚖ Баланс — тот же размер, лучше картинка", "balance"),
            ("🤏 Ширинка — меньше файл, важные целы",      "shrink"),
+           ("🔥 Экстрим-ширинка — жмёт максимально сильно", "extreme"),
            ("💎 Качество — чуть больше, максимум",         "quality"),
            ("▦ Плоский — равномерный (старый)",           "flat")],
     "en": [("⚖ Balance — same size, better image",        "balance"),
            ("🤏 Shrink — smaller file, salient kept",      "shrink"),
+           ("🔥 Extreme shrink — maximum compression",     "extreme"),
            ("💎 Quality — a bit bigger, max",              "quality"),
            ("▦ Flat — uniform (legacy)",                   "flat")],
 }

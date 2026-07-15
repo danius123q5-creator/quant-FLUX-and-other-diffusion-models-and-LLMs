@@ -82,6 +82,7 @@ total weight distortion **~19 % at equal size**. Works for every base
 |---|---|---|
 | **⚖ Balance** (default) | protect salient / squeeze dumb, size-neutral | same size, better image |
 | **🤏 Shrink** | squeeze dumb harder — the dumbest go **down two steps** (`Q4_0→Q2_K`), few upgrades | **smaller file**, salient still protected |
+| **🔥 Extreme shrink** | press ~85 % of layers down, most of them two steps | **smallest file**, quality traded for size |
 | **💎 Quality** | upgrade more salient layers, few downgrades | a bit bigger, max fidelity |
 | **▦ Flat** | uniform quant, no reallocation | legacy behaviour |
 
