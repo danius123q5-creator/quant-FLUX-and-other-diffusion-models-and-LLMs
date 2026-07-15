@@ -112,40 +112,76 @@ def _step(qn, d):
     i = _LADDER.index(qn) + d
     return _LADDER[i] if 0 <= i < len(_LADDER) else None
 
-def _smart_alloc(items, qn, log=print):
-    """items: список (key, cols, params, sens). Возвращает {key: eff_qn} только для
-    тех слоёв, что уходят ВВЕРХ/ВНИЗ; остальные пусть остаются на базовом qn.
-    Размер-нейтрально/меньше: бюджет апгрейдов ≤ освобождённые даунгрейдом байты."""
-    up_t, dn_t = _step(qn, +1), _step(qn, -1)
+# ── Режимы жмателя: пресеты распределения бит ──
+#   up      — доля самых важных слоёв под апгрейд (ступень вверх)
+#   dn      — доля самых тупых слоёв под даунгрейд
+#   two     — доля ИЗ даунгрейд-набора (самые тупые), что жмём на ДВЕ ступени
+#   budget  — сколько тратим на апгрейд как множитель освобождённых байт
+#             (1.0 = размер-нейтрально, <1 = файл меньше, >1 = разрешаем больше)
+_SMART_MODES = {
+    "balance": {"up":0.30, "dn":0.30, "two":0.0, "budget":1.0,
+                "ru":"Баланс — тот же размер, лучше картинка"},
+    "shrink":  {"up":0.10, "dn":0.55, "two":0.5, "budget":0.25,
+                "ru":"Ширинка — меньше файл, важные целы"},
+    "quality": {"up":0.45, "dn":0.15, "two":0.0, "budget":4.0,
+                "ru":"Качество — чуть больше, максимум"},
+}
+_SMART_MODE_ORDER = ["balance", "shrink", "quality"]
+
+# Подписи режимов для дроп-дауна GUI (+ «Плоский» = flat, отключает SMART)
+_MODE_LABELS = {
+    "ru": [("⚖ Баланс — тот же размер, лучше картинка", "balance"),
+           ("🤏 Ширинка — меньше файл, важные целы",      "shrink"),
+           ("💎 Качество — чуть больше, максимум",         "quality"),
+           ("▦ Плоский — равномерный (старый)",           "flat")],
+    "en": [("⚖ Balance — same size, better image",        "balance"),
+           ("🤏 Shrink — smaller file, salient kept",      "shrink"),
+           ("💎 Quality — a bit bigger, max",              "quality"),
+           ("▦ Flat — uniform (legacy)",                   "flat")],
+}
+
+def _smart_mode():
+    m = os.environ.get("XQUANT_SMART_MODE", "balance").strip().lower()
+    return m if m in _SMART_MODES else "balance"
+
+def _smart_alloc(items, qn, mode="balance", log=print):
+    """items: (key, cols, params, sens). Возвращает {key: eff_qn} для слоёв, что
+    уходят вверх/вниз. Тупые (низ по важности) → вниз (в «ширинке» — самые тупые на
+    2 ступени), важные (верх) → вверх в пределах budget×освобождённых байт."""
+    m = _SMART_MODES.get(mode, _SMART_MODES["balance"])
+    up_t = _step(qn, +1)
+    dn1  = _step(qn, -1)
+    dn2  = _step(dn1, -1) if dn1 else None                 # вторая ступень вниз
     valid = [it for it in items if it[3] >= 0]
-    if len(valid) < 6 or (up_t is None and dn_t is None):
+    if len(valid) < 6 or (up_t is None and dn1 is None):
         return {}
-    up_frac = float(os.environ.get("XQUANT_SMART_UP", "0.30") or 0.30)
-    dn_frac = float(os.environ.get("XQUANT_SMART_DN", "0.30") or 0.30)
-    by_sens = sorted(valid, key=lambda t: t[3])            # по возрастанию «важности»
-    n = len(by_sens)
-    alloc = {}
-    freed = 0.0
-    # ── ТУПЫЕ (низ) → ступень ВНИЗ, копим освобождённые байты ──
-    if dn_t is not None:
-        for key, cols, params, _ in by_sens[:max(1, int(n*dn_frac))]:
-            if cols % _BLK[dn_t]:  continue               # цель не делит строку — пропуск
-            freed += params * (_BPW[qn] - _BPW[dn_t]) / 8.0
-            alloc[key] = dn_t
-    # ── ВАЖНЫЕ (верх) → ступень ВВЕРХ, тратим не больше освобождённого ──
+    by_sens = sorted(valid, key=lambda t: t[3])            # по возрастанию важности
+    n = len(by_sens); alloc = {}; freed = 0.0
+    # ── ТУПЫЕ (низ) → вниз; самые тупые в «ширинке» — на 2 ступени ──
+    if dn1 is not None:
+        dn_list = by_sens[:max(1, int(n*m["dn"]))]
+        two_cut = int(len(dn_list) * m["two"])             # первые = самые тупые
+        for i, (key, cols, params, _) in enumerate(dn_list):
+            tgt = dn2 if (dn2 is not None and i < two_cut and cols % _BLK[dn2] == 0) else dn1
+            if cols % _BLK[tgt]: continue                  # цель не делит строку — пропуск
+            freed += params * (_BPW[qn] - _BPW[tgt]) / 8.0
+            alloc[key] = tgt
+    # ── ВАЖНЫЕ (верх) → вверх, тратим ≤ budget×freed ──
     if up_t is not None:
-        spent = 0.0; up_cap = int(n * up_frac)
-        for key, cols, params, _ in reversed(by_sens):    # самые важные первыми
-            if len(alloc) - sum(1 for v in alloc.values() if v==dn_t) >= up_cap: break
+        spent = 0.0; used = 0; up_cap = int(n * m["up"])
+        for key, cols, params, _ in reversed(by_sens):     # самые важные первыми
+            if used >= up_cap: break
             if key in alloc or cols % _BLK[up_t]: continue
             cost = params * (_BPW[up_t] - _BPW[qn]) / 8.0
-            if spent + cost > freed and freed > 0: break  # держим размер-нейтральность
-            spent += cost; alloc[key] = up_t
+            if freed > 0 and spent + cost > m["budget"] * freed: break
+            spent += cost; used += 1; alloc[key] = up_t
     nu = sum(1 for v in alloc.values() if v == up_t)
-    nd = sum(1 for v in alloc.values() if v == dn_t)
-    delta = (sum(params*(_BPW[alloc[k]]-_BPW[qn])/8.0
-                 for k,_,params,_ in valid if k in alloc)) / 1e6
-    log(f"   SMART: ↑{nu} важных→{up_t}, ↓{nd} тупых→{dn_t}  (Δразмер {delta:+.0f} МБ, база {qn})")
+    nd = sum(1 for v in alloc.values() if v in (dn1, dn2))
+    n2 = sum(1 for v in alloc.values() if v == dn2)
+    delta = sum(params*(_BPW[alloc[k]]-_BPW[qn])/8.0
+                for k,_,params,_ in valid if k in alloc) / 1e6
+    x2 = f", из них {n2}→{dn2} (×2)" if n2 else ""
+    log(f"   SMART[{mode}]: ↑{nu} важных→{up_t}, ↓{nd} тупых→{dn1}{x2}  (Δразмер {delta:+.0f} МБ)")
     return alloc
 
 def find_model_dirs():
@@ -193,7 +229,7 @@ def run_gui(prefill="", lang=None):
     def _t(k): return _L[lang].get(k, _L["en"].get(k, k))
     bits = _BITS_L[lang]
     root = tk.Tk(); root.title(_t("title"))
-    root.geometry("565x625"); root.minsize(565, 625)   # всегда открывать в этом размере
+    root.geometry("565x665"); root.minsize(565, 665)   # всегда открывать в этом размере
     try: root.eval('tk::PlaceWindow . center')
     except Exception: pass
 
@@ -250,6 +286,16 @@ def run_gui(prefill="", lang=None):
     bit_var = tk.StringVar(value=bits[3][0])
     ttk.Combobox(bf, textvariable=bit_var, values=[b[0] for b in bits],
                  state="readonly", width=32).pack(side="left", padx=8)
+
+    # Режим жмателя (распределение бит по важности слоёв)
+    mdf = tk.Frame(root); mdf.pack(fill="x", padx=18, pady=(0,4))
+    tk.Label(mdf, text=("Режим:" if lang == "ru" else "Mode:"),
+             font=("Segoe UI", 10)).pack(side="left")
+    _modes = _MODE_LABELS[lang]
+    mode_map = {lbl: mk for lbl, mk in _modes}
+    mode_var = tk.StringVar(value=_modes[0][0])          # balance по умолчанию
+    ttk.Combobox(mdf, textvariable=mode_var, values=[l for l, _ in _modes],
+                 state="readonly", width=40).pack(side="left", padx=8)
 
     # папка результата (пусто = рядом с исходником)
     of = tk.Frame(root); of.pack(fill="x", padx=18, pady=(0,2))
@@ -323,6 +369,7 @@ def run_gui(prefill="", lang=None):
         src = path_var.get().strip('"')
         if not os.path.isfile(src): logline(_t("pick")); return
         qn = dict(bits)[bit_var.get()]
+        os.environ["XQUANT_SMART_MODE"] = mode_map.get(mode_var.get(), "balance")  # выбранный режим
         od = out_var.get().strip()
         if od and os.path.isdir(od): os.environ["XQUANT_OUT_DIR"] = od       # наследуется subprocess'ом
         else: os.environ.pop("XQUANT_OUT_DIR", None)
@@ -484,10 +531,12 @@ def compress_file(src, qn, log=print):
     arch = detect_arch([k[len(pfx):] if pfx else k for k in keys])
     base_fn = OUR.get(qn, (None,None,32))[0]
     # SMART включён по УМОЛЧАНИЮ для всех битностей Q2_K…Q6_K (удаление тупых весов,
-    # защита важных, размер-нейтрально). Откат на старое поведение: XQUANT_SMART=0.
-    smart = _env_on("XQUANT_SMART", "1") and qn in _LADDER and base_fn is not None
+    # защита важных). Режим = XQUANT_SMART_MODE (balance/shrink/quality). Откат на
+    # плоский равномерный квант: XQUANT_SMART=0 или XQUANT_SMART_MODE=flat.
+    mode = os.environ.get("XQUANT_SMART_MODE", "balance").strip().lower()
+    smart = _env_on("XQUANT_SMART", "1") and mode != "flat" and qn in _LADDER and base_fn is not None
     mixed = (not smart) and qn in _UPGRADE and os.environ.get("XQUANT_MIXED","1").strip().lower() not in ("0","off","no","false")
-    tag = " (SMART: важность по данным)" if smart else (' (mixed: чувств.→'+_UPGRADE[qn]+')' if mixed else '')
+    tag = f" (SMART[{mode}])" if smart else (' (mixed: чувств.→'+_UPGRADE[qn]+')' if mixed else '')
     log(f"{os.path.basename(src)}  arch={arch}  ->  {qn}{tag}")
     # ── SMART-скан: дешёвый Q4-зонд меряет важность каждого слоя → распределение бит ──
     smart_alloc = {}
@@ -509,7 +558,7 @@ def compress_file(src, qn, log=print):
                 sens = float(np.linalg.norm(d - _q4_roundtrip(data, shape).reshape(-1)))
             except Exception: sens = -1.0
             items.append((key, int(shape[1]), npm, sens))
-        smart_alloc = _smart_alloc(items, qn, log)
+        smart_alloc = _smart_alloc(items, qn, _smart_mode(), log)
     n_total = len(keys)
     nq = nf = nup = 0; out = []; total = 0
     for k, dt, shape, raw in load_tensors(src):

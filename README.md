@@ -74,8 +74,16 @@ weights, in the spirit of AWQ's "keep the salient weights, quantize the rest
 harder." On real FLUX.1-dev at `Q4_0` base it upgrades ~40 critical layers and
 downgrades ~90 low-impact ones at **net-zero size**; on a synthetic mix it cuts
 total weight distortion **~19 % at equal size**. Works for every base
-`Q2_K…Q6_K`. Disable with `XQUANT_SMART=0`; tune spread with
-`XQUANT_SMART_UP` / `XQUANT_SMART_DN` (default `0.30`).
+`Q2_K…Q6_K`. Disable with `XQUANT_SMART=0`.
+
+**Modes** (pick from the GUI dropdown, or `XQUANT_SMART_MODE=`):
+
+| mode | what it does | result |
+|---|---|---|
+| **⚖ Balance** (default) | protect salient / squeeze dumb, size-neutral | same size, better image |
+| **🤏 Shrink** | squeeze dumb harder — the dumbest go **down two steps** (`Q4_0→Q2_K`), few upgrades | **smaller file**, salient still protected |
+| **💎 Quality** | upgrade more salient layers, few downgrades | a bit bigger, max fidelity |
+| **▦ Flat** | uniform quant, no reallocation | legacy behaviour |
 
 > Coming next: **imatrix** (activation-aware importance) — feed a few denoise
 > steps' activation statistics into the per-group solver *and* the SMART probe,

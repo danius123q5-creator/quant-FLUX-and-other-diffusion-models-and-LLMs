@@ -305,6 +305,29 @@ def _make_qx_sym(x, w, nmin=-4, nmax=3, niter=8):
         best_err = np.where(upd, e, best_err); best_dl = np.where(upd, dl, best_dl)
     return np.where(ok, np.maximum(best_dl, 1e-8), 1e-8)
 
+# ══════════ imatrix: по-канальная важность по активациям (activation-aware) ══════════
+# Драйвер ставит per-tensor столбцовую важность (sum(act²) по входам линейного слоя)
+# ПЕРЕД квантом тензора. Веса W[out,in] делят важность по столбцу in → wimp[out,in]=im[in].
+# Нет imatrix → откат на x² (data-free, как было). Это то, что делает 2/3-бит пригодным.
+_IMAT = {"col": None, "in": 0}
+
+def set_imatrix(col_importance, in_features):
+    """Задать важность активаций для СЛЕДУЮЩЕГО кванта. col_importance: 1-D длины in_features
+    (или None — сброс на data-free)."""
+    _IMAT["col"] = None if col_importance is None else np.asarray(col_importance, np.float32).reshape(-1)
+    _IMAT["in"] = int(in_features or 0)
+
+def _imat_weights(fallback_sq):
+    """Веса важности для flat-тензора (форма как fallback_sq). imatrix по столбцам,
+    разложенный row-major (W row-major → элемент p принадлежит входу p % in_features),
+    либо fallback (x²), если imatrix не задан/не подходит по размеру."""
+    col, c = _IMAT["col"], _IMAT["in"]
+    total = fallback_sq.size
+    if col is None or c <= 0 or col.size != c or total % c:
+        return fallback_sq
+    w = col[np.arange(total) % c] + 1e-8
+    return w.reshape(fallback_sq.shape)
+
 def our_quantize_q3k(x: np.ndarray) -> np.ndarray:
     """Наш энкодер GGML Q3_K. Вход float32 (кратно 256). Выход uint8 блоки (110б).
     Шаг сабблоков — взвешенным поиском (importance=x²), не absmax. XQUANT_NAIVE_Q3=1 → старое."""
