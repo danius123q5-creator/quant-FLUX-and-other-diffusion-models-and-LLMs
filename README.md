@@ -96,10 +96,21 @@ weights each input channel by `sum(act²)` instead of `x²`:
 - **Q2 becomes usable** (~4 GB from a 6.8 GB Q4) while keeping the picture;
   **Q3 stops graining.** This is the "much smaller *and* keeps quality" lever.
 
-**Collecting one** (needs the model on GPU — done inside ComfyUI, no second torch):
-add the **XQuant imatrix: Capture** node before your `KSampler` and **Save** after
-it, run 1–3 generations on varied prompts → get `<model>.imatrix.npy`. Point
-`XQuant.exe` at it (🎯 imatrix field) or set `XQUANT_IMATRIX=<path>`. It composes
+**Collecting one — two ways:**
+
+1. **Standalone script (no ComfyUI node needed)** — run `collect_imatrix.py` (or
+   double-click `Собрать-imatrix.bat`) with a CUDA torch + diffusers env (e.g. the
+   `python_embeded` from ComfyUI-portable). It runs a few FLUX transformer passes on
+   varied prompts, hooks every `Linear`, and writes `<model>.imatrix.npy`:
+   ```
+   python collect_imatrix.py --model black-forest-labs/FLUX.1-dev --out flux1-dev.imatrix.npy
+   ```
+   > Note: `cpu_offload` can segfault with hooks on new torch (cu13x) — the script
+   > avoids it by keeping only the transformer on GPU (~24 GB, fits a 24-32 GB card).
+2. **ComfyUI node** — add the **XQuant imatrix: Capture** node before your `KSampler`
+   and **Save** after it, run 1–3 generations → `<model>.imatrix.npy`.
+
+Point `XQuant.exe` at the file (🎯 imatrix field) or set `XQUANT_IMATRIX=<path>`. It composes
 with **any** mode — pair it with 🤏 Shrink / 🔥 Extreme for the smallest file that
 still looks right. Data-free fallback (weight `x²`) when no imatrix is given.
 

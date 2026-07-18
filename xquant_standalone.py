@@ -302,8 +302,8 @@ def run_gui(prefill="", lang=None):
                  state="readonly", width=40).pack(side="left", padx=8)
 
     # imatrix (активационная важность, опц.) — композится с ЛЮБЫМ режимом. Указан →
-    # квант activation-aware (Q2/Q3 держат качество при сильном сжатии). Собирается
-    # ComfyUI-нодой imatrix_collect во время генерации.
+    # квант activation-aware (Q2/Q3 держат качество при сильном сжатии). Собрать .npy:
+    # запусти collect_imatrix.py (или Собрать-imatrix.bat) рядом — БЕЗ ComfyUI-ноды.
     imf = tk.Frame(root); imf.pack(fill="x", padx=18, pady=(0,4))
     tk.Label(imf, text=("🎯 imatrix:" if lang == "ru" else "🎯 imatrix:"),
              font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
@@ -314,8 +314,8 @@ def run_gui(prefill="", lang=None):
                                        filetypes=[("imatrix", "*.npy"), ("All", "*.*")])
         if p: imat_var.set(p)
     tk.Button(imf, text=_t("browse"), command=browse_imat).grid(row=0, column=2, padx=(0,0))
-    tk.Label(imf, text=("важность по активациям — сильнее жмёт, держит качество (опц.)"
-                        if lang == "ru" else "activation importance — harder compression, keeps quality (opt.)"),
+    tk.Label(imf, text=("важность по активациям — сильнее жмёт, держит качество. Нет .npy? запусти collect_imatrix.py"
+                        if lang == "ru" else "activation importance — harder compression, keeps quality. No .npy? run collect_imatrix.py"),
              font=("Segoe UI", 8), fg="#666").grid(row=1, column=1, sticky="w")
     imf.columnconfigure(1, weight=1)
 
